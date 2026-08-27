@@ -4,10 +4,22 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ConfigPanel } from './components/config-panel';
 import { ModelMatrix } from './components/model-matrix';
 import { ModelReadout } from './components/model-readout';
-import { PROBES } from './components/probes';
+import { PROBES, probeKeysForMode } from './components/probes';
 import { SummaryOverview } from './components/summary-overview';
 import { ThemeToggle } from './components/theme-toggle';
 import type { Activity, AuthMode, ModelResult, ProbeKey, ProbeResult, ThemeMode } from './components/types';
+import {
+  classifyProbeFailure,
+  copyText,
+  downloadText,
+  familyForModel,
+  formatContext,
+  loadSettings,
+  saveSettings,
+  shouldSkipProbe,
+  skippedResult,
+  statusLabel,
+} from './components/model-utils';
 
 type RequestResult =
   | { ok: true; response: Response; body: Record<string, unknown>; url: string; firstByteMs: number; duration: number }
@@ -20,6 +32,10 @@ type DiscoveredModel = {
   contextField?: string;
 };
 
+type ProgressScope = {
+  ids: string[];
+  keys: ProbeKey[];
+};
 
 const PIXEL_IMAGE =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAPElEQVR4nGOIKUilKWIYRhbIaKhQEY1aMGoB/Szo/7CfIBq1YNSCUQtGLaC1BWSjUQtGLaCJBTRCQ98CAGjOucqTgmxxAAAAAElFTkSuQmCC';
@@ -28,17 +44,35 @@ function nowLabel() {
   return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date());
 }
 
-function familyForModel(model: string) {
-  const name = model.toLowerCase();
-  if (name.includes('claude')) return 'Claude';
-  if (name.includes('gpt') || name.includes('codex') || /^o[1-9]/.test(name)) return 'OpenAI';
-  if (name.includes('gemini')) return 'Gemini';
-  if (name.includes('qwen')) return 'Qwen';
-  if (name.includes('deepseek')) return 'DeepSeek';
-  if (name.includes('kimi') || name.includes('moonshot')) return 'Kimi';
-  if (name.includes('mistral')) return 'Mistral';
-  if (name.includes('llama')) return 'Llama';
-  return 'Custom';
+function sleep(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timer = window.setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => {
+      window.clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    }, { once: true });
+  });
+}
+
+function networkFailureMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  if (!message || /failed to fetch|networkerror|load failed/i.test(message)) {
+    return '网络请求失败，可能是 CORS 未放行或地址不可达。请确认目标 API 允许来自本站的跨域请求。';
+  }
+  return message;
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function failedProbe(detail: string, duration: number, extra: Partial<ProbeResult> = {}): ProbeResult {
+  const classified = classifyProbeFailure(detail);
+  return { status: classified.status, reason: classified.reason, detail: detail.slice(0, 180), duration, ...extra };
 }
 
 function cleanBaseUrl(value: string) {
@@ -82,6 +116,18 @@ function responseDetail(body: Record<string, unknown>, fallback: string) {
   const error = body.error as Record<string, unknown> | undefined;
   const message = error?.message ?? body.message ?? body.detail;
   return typeof message === 'string' ? message.slice(0, 180) : fallback;
+}
+
+function hasChatCompletion(body: Record<string, unknown>) {
+  return Array.isArray(body.choices) && body.choices.length > 0;
+}
+
+function hasResponsesOutput(body: Record<string, unknown>) {
+  return (Array.isArray(body.output) && body.output.length > 0) || (typeof body.output_text === 'string' && body.output_text.length > 0);
+}
+
+function hasClaudeContent(body: Record<string, unknown>) {
+  return (Array.isArray(body.content) && body.content.length > 0) || (typeof body.content === 'string' && body.content.length > 0);
 }
 
 function manualModelIds(value: string) {
@@ -191,23 +237,33 @@ async function requestJson(
 ): Promise<RequestResult> {
   let lastFailure = '请求失败';
   for (const url of urls) {
-    try {
-      const requestStarted = performance.now();
-      const headers = new Headers(init.headers);
-      Object.entries(authHeaders(mode, apiKey, style)).forEach(([key, value]) => headers.set(key, value));
-      headers.set('Accept', 'application/json');
-      if (style === 'anthropic') headers.set('anthropic-version', '2023-06-01');
-      const response = await fetch(url, { ...init, headers, signal });
-      const firstByteMs = Math.round(performance.now() - requestStarted);
-      const raw = await response.text();
-      const duration = Math.round(performance.now() - requestStarted);
-      const body = parseBody(raw);
-      if (response.ok) return { ok: true, response, body, url, firstByteMs, duration };
-      lastFailure = `${response.status} · ${responseDetail(body, response.statusText || '请求失败')}`;
-      if (response.status !== 404 && response.status !== 405) break;
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') throw error;
-      lastFailure = error instanceof Error ? error.message : '网络请求失败，可能是 CORS 或地址不可达';
+    let retried = false;
+    while (true) {
+      try {
+        const requestStarted = performance.now();
+        const headers = new Headers(init.headers);
+        Object.entries(authHeaders(mode, apiKey, style)).forEach(([key, value]) => headers.set(key, value));
+        headers.set('Accept', 'application/json');
+        if (style === 'anthropic') headers.set('anthropic-version', '2023-06-01');
+        const response = await fetch(url, { ...init, headers, signal });
+        const firstByteMs = Math.round(performance.now() - requestStarted);
+        const raw = await response.text();
+        const duration = Math.round(performance.now() - requestStarted);
+        const body = parseBody(raw);
+        if (response.ok) return { ok: true, response, body, url, firstByteMs, duration };
+        lastFailure = `${response.status} · ${responseDetail(body, response.statusText || '请求失败')}`;
+        if (response.status === 429 && !retried) {
+          retried = true;
+          await sleep(1200, signal);
+          continue;
+        }
+        if (response.status !== 404 && response.status !== 405) break;
+        break;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        lastFailure = networkFailureMessage(error);
+        break;
+      }
     }
   }
   return { ok: false, detail: lastFailure };
@@ -309,81 +365,108 @@ async function probeModel(
     let lastDetail = '流式请求失败';
     for (const url of chatUrls) {
       try {
-        const response = await fetch(url, { ...baseJsonInit({ model, messages: [{ role: 'user', content: '请用一句简短的话介绍自己。' }], max_tokens: 24, stream: true, stream_options: { include_usage: true } }), headers, signal });
-        const firstByteMs = Math.round(performance.now() - started);
+        // Do not require stream_options here: many OpenAI-compatible gateways
+        // support SSE but reject this optional usage-reporting parameter.
+        const response = await fetch(url, { ...baseJsonInit({ model, messages: [{ role: 'user', content: '请用一句简短的话介绍自己。' }], max_tokens: 24, stream: true }), headers, signal });
         if (response.ok) {
           const reader = response.body?.getReader();
-          let firstTokenMs: number | undefined;
+          if (!reader) {
+            lastDetail = `${response.status} · 请求成功，但响应没有可读取的 SSE 内容`;
+            continue;
+          }
+          let firstTokenElapsedMs: number | undefined;
           let outputTokens: number | undefined;
           let contentChars = 0;
-          if (reader) {
-            const decoder = new TextDecoder();
-            let buffer = '';
-            let finished = false;
-            while (!finished) {
-              const next = await reader.read();
-              if (next.done) break;
-              buffer += decoder.decode(next.value, { stream: true });
-              const lines = buffer.split(/\r?\n/);
-              buffer = lines.pop() ?? '';
-              for (const line of lines) {
-                if (!line.startsWith('data:')) continue;
-                const data = line.slice(5).trim();
-                if (data === '[DONE]') {
-                  finished = true;
-                  break;
-                }
-                const payload = parseBody(data);
-                const choices = Array.isArray(payload.choices) ? payload.choices : [];
-                const delta = choices[0] && typeof choices[0] === 'object' ? (choices[0] as Record<string, unknown>).delta : undefined;
-                const content = delta && typeof delta === 'object' ? (delta as Record<string, unknown>).content : undefined;
-                if (typeof content === 'string' && content.length > 0) {
-                  firstTokenMs ??= Math.round(performance.now() - started);
-                  contentChars += content.length;
-                }
-                const usage = payload.usage;
-                if (usage && typeof usage === 'object') {
-                  const completionTokens = (usage as Record<string, unknown>).completion_tokens;
-                  if (typeof completionTokens === 'number') outputTokens = completionTokens;
-                }
-              }
+          let sawSseData = false;
+          let finished = false;
+          const processLine = (line: string) => {
+            if (!line.startsWith('data:')) return;
+            const data = line.slice(5).trim();
+            if (data === '[DONE]') {
+              finished = true;
+              return;
             }
-            await reader.cancel();
+            sawSseData = true;
+            const payload = parseBody(data);
+            const choices = Array.isArray(payload.choices) ? payload.choices : [];
+            const delta = choices[0] && typeof choices[0] === 'object' ? (choices[0] as Record<string, unknown>).delta : undefined;
+            const content = delta && typeof delta === 'object' ? (delta as Record<string, unknown>).content : undefined;
+            if (typeof content === 'string' && content.length > 0) {
+              firstTokenElapsedMs ??= performance.now() - started;
+              contentChars += content.length;
+            }
+            const usage = payload.usage;
+            if (usage && typeof usage === 'object') {
+              const completionTokens = (usage as Record<string, unknown>).completion_tokens;
+              if (typeof completionTokens === 'number') outputTokens = completionTokens;
+            }
+          };
+          const decoder = new TextDecoder();
+          let buffer = '';
+          while (!finished) {
+            const next = await reader.read();
+            if (next.done) {
+              buffer += decoder.decode();
+              break;
+            }
+            buffer += decoder.decode(next.value, { stream: true });
+            const lines = buffer.split(/\r?\n/);
+            buffer = lines.pop() ?? '';
+            for (const line of lines) {
+              processLine(line);
+              if (finished) break;
+            }
+          }
+          if (!finished && buffer.trim()) processLine(buffer);
+          await reader.cancel();
+
+          if (!sawSseData || contentChars === 0 || typeof firstTokenElapsedMs !== 'number') {
+            return { status: 'warn', reason: 'partial', detail: `${Math.round(performance.now() - started)} ms · 请求成功，但没有收到可计量的文本流`, duration: Math.round(performance.now() - started), endpoint: url };
           }
           const duration = Math.round(performance.now() - started);
-          const measuredFirstToken = firstTokenMs ?? firstByteMs;
-          const generationSeconds = Math.max((duration - measuredFirstToken) / 1000, 0.001);
-          const tokensPerSecond = outputTokens && outputTokens > 0 ? Number((outputTokens / generationSeconds).toFixed(1)) : undefined;
-          const charsPerSecond = contentChars > 0 ? Number((contentChars / generationSeconds).toFixed(1)) : undefined;
-          const speedLabel = tokensPerSecond ? `${tokensPerSecond} tokens/s` : charsPerSecond ? `${charsPerSecond} chars/s` : '服务未返回可计量内容';
+          const measuredFirstToken = Math.round(firstTokenElapsedMs);
+          const generationMs = performance.now() - started - firstTokenElapsedMs;
+          const hasReliableSpeedSample = generationMs >= 10;
+          const generationSeconds = generationMs / 1000;
+          const tokensPerSecond = hasReliableSpeedSample && outputTokens && outputTokens > 0 ? Number((outputTokens / generationSeconds).toFixed(1)) : undefined;
+          const charsPerSecond = hasReliableSpeedSample ? Number((contentChars / generationSeconds).toFixed(1)) : undefined;
+          const speedLabel = tokensPerSecond ? `${tokensPerSecond} tokens/s` : charsPerSecond ? `${charsPerSecond} chars/s` : '响应过短，暂无法稳定计算速度';
           return { status: 'pass', detail: `首字 ${measuredFirstToken} ms · ${speedLabel}`, duration, firstTokenMs: measuredFirstToken, tokensPerSecond, charsPerSecond, outputTokens, endpoint: url };
         }
         const raw = await response.text();
         lastDetail = `${response.status} · ${responseDetail(parseBody(raw), response.statusText || '请求失败')}`;
         if (response.status !== 404 && response.status !== 405) break;
       } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') throw error;
-        lastDetail = error instanceof Error ? error.message : '网络请求失败';
+        if (isAbortError(error)) throw error;
+        lastDetail = networkFailureMessage(error);
       }
     }
-    return { status: 'fail', detail: lastDetail.slice(0, 180), duration: Math.round(performance.now() - started) };
+    return failedProbe(lastDetail, Math.round(performance.now() - started));
   }
 
   const duration = Math.round(performance.now() - started);
   if (result.ok) {
+    if ((key === 'text' || key === 'vision' || key === 'json') && !hasChatCompletion(result.body)) {
+      return { status: 'warn', reason: 'partial', detail: `${duration} ms · HTTP 成功，但响应结构中没有可识别的 choices`, duration, endpoint: result.url };
+    }
+    if (key === 'responses' && !hasResponsesOutput(result.body)) {
+      return { status: 'warn', reason: 'partial', detail: `${duration} ms · HTTP 成功，但响应结构中没有可识别的 output`, duration, endpoint: result.url };
+    }
+    if (key === 'claude' && !hasClaudeContent(result.body)) {
+      return { status: 'warn', reason: 'partial', detail: `${duration} ms · HTTP 成功，但响应结构中没有可识别的 content`, duration, endpoint: result.url };
+    }
     if (key === 'tools') {
       const choices = Array.isArray(result.body?.choices) ? result.body.choices : [];
       const firstChoice = choices[0] as Record<string, unknown> | undefined;
       const message = firstChoice?.message as Record<string, unknown> | undefined;
       const toolCalls = message?.tool_calls;
       if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
-        return { status: 'warn', detail: `${duration} ms · 请求被接受，但响应没有返回 tool_calls`, duration, endpoint: result.url };
+        return { status: 'warn', reason: 'partial', detail: `${duration} ms · 请求被接受，但响应没有返回 tool_calls`, duration, endpoint: result.url };
       }
     }
     return { status: 'pass', detail: `${duration} ms · HTTP ${result.response?.status ?? 200}`, duration, endpoint: result.url };
   }
-  const isUnsupported = Boolean(result.detail?.startsWith('400') || result.detail?.startsWith('404') || result.detail?.startsWith('405'));
-  return { status: isUnsupported ? 'warn' : 'fail', detail: result.detail?.slice(0, 180) ?? '请求失败', duration };
+  return failedProbe(result.detail ?? '请求失败', duration);
 }
 
 export default function Home() {
@@ -402,7 +485,25 @@ export default function Home() {
   const [phase, setPhase] = useState('等待接入');
   const [error, setError] = useState('');
   const [themeMode, setThemeMode] = useState<ThemeMode>('system');
+  const [hydrated, setHydrated] = useState(false);
+  const [progressScope, setProgressScope] = useState<ProgressScope | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const saved = loadSettings();
+    if (typeof saved.baseUrl === 'string' && saved.baseUrl) setBaseUrl(saved.baseUrl);
+    if (saved.authModeValue === 'auto' || saved.authModeValue === 'bearer' || saved.authModeValue === 'x-api-key' || saved.authModeValue === 'none') setAuthModeValue(saved.authModeValue);
+    if (typeof saved.manualModels === 'string') setManualModels(saved.manualModels);
+    if (typeof saved.deepScan === 'boolean') setDeepScan(saved.deepScan);
+    if (typeof saved.maxModels === 'string' && saved.maxModels) setMaxModels(saved.maxModels);
+    if (saved.themeMode === 'system' || saved.themeMode === 'light' || saved.themeMode === 'dark') setThemeMode(saved.themeMode);
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveSettings({ baseUrl, authModeValue, manualModels, deepScan, maxModels, themeMode });
+  }, [hydrated, baseUrl, authModeValue, manualModels, deepScan, maxModels, themeMode]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -425,7 +526,7 @@ export default function Home() {
       vision: models.filter((model) => model.probes.vision?.status === 'pass').length,
       code: models.filter((model) => model.probes.responses?.status === 'pass' || model.probes.claude?.status === 'pass').length,
       passed: allProbes.filter((probe) => probe?.status === 'pass').length,
-      tested: allProbes.filter((probe) => probe?.status && probe.status !== 'running').length,
+      tested: allProbes.filter((probe) => probe?.status && probe.status !== 'running' && probe.status !== 'skipped').length,
       avgFirstToken: average(firstTokenValues),
       avgTokenSpeed: average(tokenSpeedValues),
       avgCharSpeed: average(charSpeedValues),
@@ -435,11 +536,33 @@ export default function Home() {
   }, [models]);
 
   function addActivity(message: string, tone: Activity['tone'] = 'neutral') {
-    setActivities((current) => [{ time: nowLabel(), message, tone }, ...current].slice(0, 8));
+    setActivities((current) => [{ time: nowLabel(), message, tone }, ...current].slice(0, 12));
   }
 
   function updateModel(id: string, key: ProbeKey, probe: ProbeResult) {
     setModels((current) => current.map((model) => model.id === id ? { ...model, probes: { ...model.probes, [key]: probe } } : model));
+  }
+
+  async function probeOneModel(modelId: string, keys: ProbeKey[], trimmedBase: string, signal: AbortSignal) {
+    let textResult: ProbeResult | undefined;
+    for (const key of keys) {
+      if (textResult && shouldSkipProbe(textResult, key)) {
+        updateModel(modelId, key, skippedResult(textResult));
+        continue;
+      }
+      updateModel(modelId, key, { status: 'running', detail: '请求中…' });
+      let result: ProbeResult;
+      try {
+        result = await probeModel(trimmedBase, apiKey, authModeValue, modelId, key, signal);
+      } catch (caught) {
+        if (isAbortError(caught)) {
+          updateModel(modelId, key, { status: 'skipped', reason: 'skipped', detail: '用户停止了本次探测' });
+        }
+        throw caught;
+      }
+      if (key === 'text') textResult = result;
+      updateModel(modelId, key, result);
+    }
   }
 
   async function discoverModels(controller: AbortController): Promise<{ discovered: DiscoveredModel[]; endpoint: string }> {
@@ -501,6 +624,7 @@ export default function Home() {
     setCatalogTotal(0);
     setCatalogOnly(true);
     setSelectedModel(null);
+    setProgressScope(null);
     setActivities([]);
     setPhase('读取模型目录');
     addActivity('开始读取模型列表');
@@ -540,25 +664,23 @@ export default function Home() {
     setCatalogTotal(0);
     setCatalogOnly(false);
     setSelectedModel(null);
+    setProgressScope(null);
     setActivities([]);
     setPhase('读取模型目录');
     addActivity('开始连接模型 API');
 
     try {
       const found = await discoverModels(controller);
+      const probeKeys = probeKeysForMode(deepScan);
       const { initialModels, limited } = applyModelCatalog(found, true);
+      setProgressScope({ ids: initialModels.map((model) => model.id), keys: probeKeys });
       addActivity(`发现 ${found.discovered.length} 个模型 · ${found.endpoint}`, 'good');
       if (found.discovered.length > limited.length) addActivity(`为控制请求量，本次先测试前 ${limited.length} 个模型`);
 
-      const probeKeys: ProbeKey[] = deepScan ? PROBES.map((probe) => probe.key) : ['text', 'stream'];
       for (let index = 0; index < initialModels.length; index += 1) {
         const model = initialModels[index];
         setPhase(`测试 ${index + 1}/${initialModels.length} · ${model.id}`);
-        for (const key of probeKeys) {
-          updateModel(model.id, key, { status: 'running', detail: '请求中…' });
-          const result = await probeModel(trimmedBase, apiKey, authModeValue, model.id, key, controller.signal);
-          updateModel(model.id, key, result);
-        }
+        await probeOneModel(model.id, probeKeys, trimmedBase, controller.signal);
         addActivity(`${model.id} · ${deepScan ? '深度探测完成' : '可调用性检查完成'}`, 'good');
       }
       setPhase('体检完成');
@@ -583,10 +705,108 @@ export default function Home() {
     abortRef.current?.abort();
   }
 
-  const progress = models.length ? Math.round((summary.tested / (models.length * (deepScan ? PROBES.length : 2))) * 100) : 0;
+  async function testModel(id: string) {
+    if (running) return;
+    if (!models.some((model) => model.id === id)) return;
+    const trimmedBase = validateBaseUrl();
+    if (!trimmedBase) return;
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setRunning(true);
+    setError('');
+    setCatalogOnly(false);
+    setSelectedModel(id);
+    const probeKeys = probeKeysForMode(deepScan);
+    setModels((current) => current.map((model) => model.id === id ? { ...model, probes: {} } : model));
+    setProgressScope({ ids: [id], keys: probeKeys });
+    setPhase(`测试 ${id}`);
+    addActivity(`开始单独测试 ${id}`);
+
+    try {
+      await probeOneModel(id, probeKeys, trimmedBase, controller.signal);
+      setPhase('单模型测试完成');
+      addActivity(`${id} · 单独探测完成`, 'good');
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'AbortError') {
+        setPhase('已停止');
+        addActivity('用户中止了单模型测试');
+      } else {
+        const message = caught instanceof Error ? caught.message : '未知错误';
+        setError(message);
+        setPhase('测试中断');
+        addActivity(message, 'bad');
+      }
+    } finally {
+      setRunning(false);
+      abortRef.current = null;
+    }
+  }
+
+  function reportPayload() {
+    return {
+      generatedAt: new Date().toISOString(),
+      baseUrl: cleanBaseUrl(baseUrl),
+      mode: catalogOnly ? 'catalog' : deepScan ? 'deep' : 'quick',
+      catalogTotal,
+      summary,
+      models: models.map((model) => ({
+        id: model.id,
+        family: model.family,
+        ownedBy: model.ownedBy,
+        declaredContext: model.declaredContext,
+        contextField: model.contextField,
+        probes: model.probes,
+      })),
+    };
+  }
+
+  function exportJson() {
+    if (!models.length) return;
+    downloadText(`model-api-report-${Date.now()}.json`, JSON.stringify(reportPayload(), null, 2));
+    addActivity('已导出 JSON 报告', 'good');
+  }
+
+  async function copyMarkdown() {
+    if (!models.length) return;
+    const payload = reportPayload();
+    const lines = [
+      '# 模型 API 体检报告',
+      '',
+      `- Base URL: \`${payload.baseUrl}\``,
+      `- 模式: ${payload.mode}`,
+      `- 时间: ${payload.generatedAt}`,
+      `- 模型: ${payload.models.length} / 目录 ${payload.catalogTotal || payload.models.length}`,
+      '',
+    ];
+    for (const model of payload.models) {
+      lines.push(`## ${model.id}`);
+      lines.push(`- 家族: ${model.family}${model.ownedBy ? ` · ${model.ownedBy}` : ''}`);
+      lines.push(`- Context: ${formatContext(model.declaredContext)}${model.contextField ? ` (${model.contextField})` : ''}`);
+      for (const probe of PROBES) {
+        const result = model.probes[probe.key];
+        lines.push(`- ${probe.short}: ${result ? `${statusLabel(result.status)} · ${result.detail}` : '未测'}`);
+      }
+      lines.push('');
+    }
+    const ok = await copyText(lines.join('\n'));
+    addActivity(ok ? '已复制 Markdown 报告' : '复制失败，请检查剪贴板权限', ok ? 'good' : 'bad');
+  }
+
+  const progressTotal = progressScope ? progressScope.ids.length * progressScope.keys.length : 0;
+  const progressCompleted = progressScope
+    ? progressScope.ids.reduce((count, id) => {
+      const model = models.find((item) => item.id === id);
+      return count + (model ? progressScope.keys.filter((key) => {
+        const status = model.probes[key]?.status;
+        return Boolean(status) && status !== 'running';
+      }).length : 0);
+    }, 0)
+    : 0;
+  const progress = progressTotal ? Math.min(100, Math.round((progressCompleted / progressTotal) * 100)) : 0;
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" aria-busy={running}>
       <div className="ambient ambient-one" />
       <div className="ambient ambient-two" />
       <header className="topbar">
@@ -619,12 +839,12 @@ export default function Home() {
         <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} deepScan={deepScan} maxModels={maxModels} running={running} phase={phase} progress={progress} activities={activities} onBaseUrlChange={setBaseUrl} onApiKeyChange={setApiKey} onAuthModeChange={setAuthModeValue} onManualModelsChange={setManualModels} onDeepScanChange={setDeepScan} onMaxModelsChange={setMaxModels} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
         <section className="results-column">
           <SummaryOverview summary={summary} />
-          <ModelMatrix models={models} selectedId={selected?.id ?? null} deepScan={deepScan} catalogOnly={catalogOnly} catalogTotal={catalogTotal} maxModels={maxModels} summary={summary} error={error} onSelect={setSelectedModel} />
-          {selected && <ModelReadout selected={selected} baseUrl={baseUrl} catalogOnly={catalogOnly} />}
+          <ModelMatrix models={models} selectedId={selected?.id ?? null} deepScan={deepScan} catalogOnly={catalogOnly} catalogTotal={catalogTotal} maxModels={maxModels} summary={summary} error={error} running={running} onSelect={setSelectedModel} onExportJson={exportJson} onCopyMarkdown={copyMarkdown} />
+          {selected && <ModelReadout selected={selected} baseUrl={baseUrl} catalogOnly={catalogOnly} deepScan={deepScan} running={running} onTestModel={testModel} />}
         </section>
       </section>
 
-      <footer><span>MODEL API COMPATIBILITY LAB</span><span>v0.1 · Client-side diagnostics · <a href="https://github.com/jielosc/model-api-compat-lab" target="_blank" rel="noreferrer">VIEW SOURCE ↗</a></span></footer>
+      <footer><span>MODEL API COMPATIBILITY LAB</span><span>v0.2 · Client-side diagnostics · <a href="https://github.com/jielosc/model-api-compat-lab" target="_blank" rel="noreferrer">VIEW SOURCE ↗</a></span></footer>
     </main>
   );
 }

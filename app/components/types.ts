@@ -1,11 +1,13 @@
 export type ProbeKey = 'text' | 'vision' | 'tools' | 'json' | 'stream' | 'responses' | 'claude';
-export type ProbeStatus = 'idle' | 'running' | 'pass' | 'warn' | 'fail';
+export type ProbeStatus = 'idle' | 'running' | 'pass' | 'warn' | 'fail' | 'skipped';
+export type ProbeReason = 'unsupported' | 'auth' | 'rate_limit' | 'network' | 'error' | 'skipped' | 'partial';
 export type AuthMode = 'auto' | 'bearer' | 'x-api-key' | 'none';
 export type ThemeMode = 'system' | 'light' | 'dark';
 
 export type ProbeResult = {
   status: ProbeStatus;
   detail: string;
+  reason?: ProbeReason;
   duration?: number;
   firstTokenMs?: number;
   tokensPerSecond?: number;

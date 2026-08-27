@@ -9,3 +9,10 @@ export const PROBES: Array<{ key: ProbeKey; label: string; short: string; descri
   { key: 'responses', label: 'Codex / Responses', short: 'RESPONSES', description: 'OpenAI Responses API' },
   { key: 'claude', label: 'Claude Code', short: 'CLAUDE', description: 'Anthropic Messages API' },
 ];
+
+export const QUICK_PROBE_KEYS: ProbeKey[] = ['text', 'stream'];
+export const CHAT_PROBE_KEYS: ProbeKey[] = ['text', 'vision', 'tools', 'json', 'stream'];
+
+export function probeKeysForMode(deepScan: boolean): ProbeKey[] {
+  return deepScan ? PROBES.map((probe) => probe.key) : QUICK_PROBE_KEYS;
+}

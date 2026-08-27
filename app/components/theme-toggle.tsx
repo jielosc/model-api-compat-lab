@@ -17,7 +17,7 @@ export function ThemeToggle({ value, onChange }: ThemeToggleProps) {
   return (
     <div className="theme-toggle" role="radiogroup" aria-label="页面主题">
       {options.map(([mode, label, title]) => (
-        <button key={mode} type="button" className={value === mode ? 'selected' : ''} aria-label={title} aria-pressed={value === mode} onClick={() => onChange(mode)}>
+        <button key={mode} type="button" role="radio" className={value === mode ? 'selected' : ''} aria-label={title} aria-checked={value === mode} onClick={() => onChange(mode)}>
           {label}
         </button>
       ))}
