@@ -85,6 +85,17 @@ function endpointCandidates(baseUrl: string, path: string) {
   return [...new Set(candidates)];
 }
 
+function modelEndpointCandidates(baseUrl: string) {
+  const root = cleanBaseUrl(baseUrl);
+  const candidates = endpointCandidates(root, '/models');
+  if (/\/api$/i.test(root)) {
+    candidates.push(`${root}/tags`);
+  } else if (!/\/v\d+(?:\/|$)/i.test(root)) {
+    candidates.push(`${root}/api/v1/models`, `${root}/api/tags`);
+  }
+  return [...new Set(candidates)];
+}
+
 function authHeaders(mode: AuthMode, apiKey: string, style: 'openai' | 'anthropic' = 'openai'): Record<string, string> {
   if (mode === 'none' || !apiKey) return {};
   const useAnthropic = mode === 'x-api-key' || (mode === 'auto' && style === 'anthropic');
@@ -114,19 +125,30 @@ function manualModelIds(value: string) {
 
 const CONTEXT_FIELDS = [
   'context_length',
+  'contextLength',
   'context_window',
+  'contextWindow',
   'context_window_size',
   'max_context_length',
+  'maxContextLength',
   'max_model_len',
+  'maxModelLen',
   'max_input_tokens',
+  'maxInputTokens',
   'input_token_limit',
+  'inputTokenLimit',
   'token_limit',
+  'num_ctx',
+  'numCtx',
 ] as const;
 
 function numericContext(value: unknown) {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.round(value);
-  if (typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim())) {
-    const parsed = Number(value);
+  if (typeof value === 'string') {
+    const match = value.trim().match(/^(\d+(?:\.\d+)?)\s*([km])?(?:\s*tokens?)?$/i);
+    if (!match) return undefined;
+    const multiplier = match[2]?.toLowerCase() === 'm' ? 1_000_000 : match[2] ? 1_000 : 1;
+    const parsed = Number(match[1]) * multiplier;
     return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : undefined;
   }
   return undefined;
@@ -134,7 +156,7 @@ function numericContext(value: unknown) {
 
 function readDeclaredContext(item: Record<string, unknown>) {
   const sources: Array<{ record: Record<string, unknown>; prefix: string }> = [{ record: item, prefix: '' }];
-  for (const key of ['metadata', 'model_info', 'details', 'limits', 'capabilities', 'parameters']) {
+  for (const key of ['metadata', 'model_info', 'details', 'limits', 'capabilities', 'parameters', 'config', 'options']) {
     const nested = item[key];
     if (nested && typeof nested === 'object' && !Array.isArray(nested)) sources.push({ record: nested as Record<string, unknown>, prefix: `${key}.` });
   }
@@ -145,6 +167,50 @@ function readDeclaredContext(item: Record<string, unknown>) {
     }
   }
   return {};
+}
+
+const MODEL_LIST_KEYS = ['data', 'models', 'results', 'items', 'model_list', 'modelList', 'available_models', 'availableModels', 'model_ids', 'modelIds'];
+
+function modelItems(payload: unknown, depth = 0): unknown[] {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object' || depth > 2) return [];
+  const record = payload as Record<string, unknown>;
+  for (const key of MODEL_LIST_KEYS) {
+    const candidate = record[key];
+    if (Array.isArray(candidate)) return candidate;
+    const nested = modelItems(candidate, depth + 1);
+    if (nested.length) return nested;
+  }
+  const entries = Object.entries(record).filter(([key, value]) => !['error', 'message', 'detail', 'object'].includes(key) && value && typeof value === 'object' && !Array.isArray(value));
+  if (entries.length) return entries.map(([key, value]) => ({ id: key, ...(value as Record<string, unknown>) }));
+  return [];
+}
+
+function modelId(item: unknown) {
+  if (typeof item === 'string') return item.trim();
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return '';
+  const record = item as Record<string, unknown>;
+  for (const key of ['id', 'model', 'model_id', 'modelId', 'name', 'model_name', 'modelName', 'slug']) {
+    if (typeof record[key] === 'string' && record[key].trim()) return record[key].trim();
+  }
+  return '';
+}
+
+function extractModels(body: unknown): DiscoveredModel[] {
+  const unique = new Map<string, DiscoveredModel>();
+  for (const rawItem of modelItems(body)) {
+    const id = modelId(rawItem);
+    if (!id) continue;
+    const item = rawItem && typeof rawItem === 'object' && !Array.isArray(rawItem) ? rawItem as Record<string, unknown> : {};
+    const context = readDeclaredContext(item);
+    if (!unique.has(id)) unique.set(id, {
+      id,
+      ownedBy: typeof item.owned_by === 'string' ? item.owned_by : typeof item.ownedBy === 'string' ? item.ownedBy : typeof item.provider === 'string' ? item.provider : undefined,
+      declaredContext: context.value,
+      contextField: context.field,
+    });
+  }
+  return [...unique.values()];
 }
 
 function formatContext(value?: number) {
@@ -426,26 +492,25 @@ export default function Home() {
   }
 
   async function discoverModels(controller: AbortController): Promise<{ discovered: DiscoveredModel[]; endpoint: string }> {
-    const urls = endpointCandidates(baseUrl, '/models');
-    let first = await requestJson(urls, { method: 'GET' }, authModeValue, apiKey, 'openai', controller.signal);
-    if (!first.ok && authModeValue === 'auto') {
-      first = await requestJson(urls, { method: 'GET' }, authModeValue, apiKey, 'anthropic', controller.signal);
-    }
-    if (first.ok) {
-      const rawList = Array.isArray(first.body?.data) ? first.body.data : Array.isArray(first.body) ? first.body : [];
-      const discovered = rawList
-        .map((item) => typeof item === 'string' ? { id: item } : item && typeof item === 'object' ? item as Record<string, unknown> : {})
-        .map((item) => {
-          const context = readDeclaredContext(item);
-          return { id: String(item.id ?? ''), ownedBy: item.owned_by ? String(item.owned_by) : undefined, declaredContext: context.value, contextField: context.field };
-        })
-        .filter((item) => item.id);
-      if (discovered.length) return { discovered, endpoint: first.url };
+    const urls = modelEndpointCandidates(baseUrl);
+    const styles: Array<'openai' | 'anthropic'> = authModeValue === 'auto' ? ['openai', 'anthropic'] : ['openai'];
+    let lastFailure = '无法识别模型列表';
+    for (const style of styles) {
+      for (const url of urls) {
+        const result = await requestJson([url], { method: 'GET' }, authModeValue, apiKey, style, controller.signal);
+        if (!result.ok) {
+          lastFailure = result.detail;
+          continue;
+        }
+        const discovered = extractModels(result.body);
+        if (discovered.length) return { discovered, endpoint: result.url };
+        lastFailure = `接口返回成功，但 ${url} 的响应中没有识别到模型条目`;
+      }
     }
 
     const ids = manualModelIds(manualModels).map((id) => ({ id, ownedBy: undefined as string | undefined, declaredContext: undefined as number | undefined, contextField: undefined as string | undefined }));
     if (ids.length) return { discovered: ids, endpoint: '手动输入' };
-    throw new Error(first.ok ? '接口返回成功，但没有找到 data[].id；可在“手动模型 ID”中填写模型。' : first.detail ?? '无法访问模型列表');
+    throw new Error(`${lastFailure}。已尝试 /models、/v1/models 及常见兼容路径；也可在“手动模型 ID”中填写模型。`);
   }
 
   function validateBaseUrl() {

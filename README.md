@@ -6,7 +6,7 @@
 
 ## 能力
 
-- 读取 OpenAI-compatible / Anthropic-compatible API 的模型目录
+- 读取 OpenAI-compatible / Anthropic-compatible API 的模型目录，并兼容常见的 `data`、`models`、`results`、`items` 返回格式
 - 支持只获取模型列表，不发起能力测试请求
 - 探测文本、多模态、工具调用、JSON、流式输出
 - 检查 OpenAI Responses API（Codex 兼容基础）和 Anthropic Messages API（Claude Code 兼容基础）
