@@ -2,6 +2,8 @@
 
 一个在浏览器中运行的模型 API 能力与兼容性探测工具。
 
+**在线预览：** <https://model-api-compat-lab.pages.dev/> · **源码：** <https://github.com/jielosc/model-api-compat-lab>
+
 ## 能力
 
 - 读取 OpenAI-compatible / Anthropic-compatible API 的模型目录

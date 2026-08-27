@@ -570,7 +570,7 @@ export default function Home() {
         </section>
       </section>
 
-      <footer><span>MODEL API COMPATIBILITY LAB</span><span>v0.1 · Client-side diagnostics</span></footer>
+      <footer><span>MODEL API COMPATIBILITY LAB</span><span>v0.1 · Client-side diagnostics · <a href="https://github.com/jielosc/model-api-compat-lab" target="_blank" rel="noreferrer">VIEW SOURCE ↗</a></span></footer>
     </main>
   );
 }
