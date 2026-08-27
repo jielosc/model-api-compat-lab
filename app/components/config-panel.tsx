@@ -12,7 +12,6 @@ type ConfigPanelProps = {
   modelOptions: ModelResult[];
   selectedModelIds: string[];
   deepScan: boolean;
-  maxModels: string;
   running: boolean;
   fetchingModels: boolean;
   phase: string;
@@ -26,7 +25,6 @@ type ConfigPanelProps = {
   onSelectAllModels: () => void;
   onClearModels: () => void;
   onDeepScanChange: (value: boolean) => void;
-  onMaxModelsChange: (value: string) => void;
   onGetModelList: () => void;
   onRunHealthCheck: () => void;
   onStopHealthCheck: () => void;
@@ -40,7 +38,6 @@ export function ConfigPanel({
   modelOptions,
   selectedModelIds,
   deepScan,
-  maxModels,
   running,
   fetchingModels,
   phase,
@@ -54,7 +51,6 @@ export function ConfigPanel({
   onSelectAllModels,
   onClearModels,
   onDeepScanChange,
-  onMaxModelsChange,
   onGetModelList,
   onRunHealthCheck,
   onStopHealthCheck,
@@ -179,10 +175,6 @@ export function ConfigPanel({
         <div className="scan-mode-selector" role="radiogroup" aria-label="扫描模式">
           <button type="button" role="radio" className={!deepScan ? 'selected' : ''} aria-checked={!deepScan} onClick={() => onDeepScanChange(false)}><span className="mode-mark">01</span><span><strong>快速模式</strong><small>2 个低成本请求 · 文本 + 流式</small></span></button>
           <button type="button" role="radio" className={deepScan ? 'selected' : ''} aria-checked={deepScan} onClick={() => onDeepScanChange(true)}><span className="mode-mark">02</span><span><strong>深度模式</strong><small>最多 7 个请求 · 全部能力探测</small></span></button>
-        </div>
-        <div className="option-row compact-row">
-          <div><strong>最多测试模型</strong><small>只限制一键体检，不限制获取列表或单模型复测</small></div>
-          <select value={maxModels} onChange={(event) => onMaxModelsChange(event.target.value)} aria-label="最多测试模型数量"><option value="6">06</option><option value="12">12</option><option value="24">24</option><option value="50">50</option></select>
         </div>
       </div>
 

@@ -11,7 +11,6 @@ type ModelMatrixProps = {
   deepScan: boolean;
   catalogOnly: boolean;
   catalogTotal: number;
-  maxModels: string;
   summary: Summary;
   error: string;
   running: boolean;
@@ -34,7 +33,6 @@ export function ModelMatrix({
   deepScan,
   catalogOnly,
   catalogTotal,
-  maxModels,
   summary,
   error,
   running,
@@ -172,7 +170,6 @@ export function ModelMatrix({
             <span>{summary.tested ? '点击模型行查看探测详情，可在右侧单独复测' : '点击模型行查看 Context 与目录信息'}</span>
             <span>
               已显示 {filtered.length} / 发现 {catalogTotal || models.length} 个模型
-              {!catalogOnly && catalogTotal > models.length ? ` · 本次测试上限 ${maxModels}` : ''}
             </span>
           </div>
         </>

@@ -475,7 +475,6 @@ export default function Home() {
   const [authModeValue, setAuthModeValue] = useState<AuthMode>('auto');
   const [manualModels, setManualModels] = useState('');
   const [deepScan, setDeepScan] = useState(false);
-  const [maxModels, setMaxModels] = useState('12');
   const [models, setModels] = useState<ModelResult[]>([]);
   const [catalogModels, setCatalogModels] = useState<ModelResult[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
@@ -498,15 +497,14 @@ export default function Home() {
     if (saved.authModeValue === 'auto' || saved.authModeValue === 'bearer' || saved.authModeValue === 'x-api-key' || saved.authModeValue === 'none') setAuthModeValue(saved.authModeValue);
     if (typeof saved.manualModels === 'string') setManualModels(saved.manualModels);
     if (typeof saved.deepScan === 'boolean') setDeepScan(saved.deepScan);
-    if (typeof saved.maxModels === 'string' && saved.maxModels) setMaxModels(saved.maxModels);
     if (saved.themeMode === 'system' || saved.themeMode === 'light' || saved.themeMode === 'dark') setThemeMode(saved.themeMode);
     setHydrated(true);
   }, []);
 
   useEffect(() => {
     if (!hydrated) return;
-    saveSettings({ baseUrl, authModeValue, manualModels, deepScan, maxModels, themeMode });
-  }, [hydrated, baseUrl, authModeValue, manualModels, deepScan, maxModels, themeMode]);
+    saveSettings({ baseUrl, authModeValue, manualModels, deepScan, themeMode });
+  }, [hydrated, baseUrl, authModeValue, manualModels, deepScan, themeMode]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -605,17 +603,16 @@ export default function Home() {
     return trimmedBase;
   }
 
-  function applyModelCatalog(found: { discovered: DiscoveredModel[]; endpoint: string }, limitToMaxModels: boolean, selectedIds?: Set<string>) {
+  function applyModelCatalog(found: { discovered: DiscoveredModel[]; endpoint: string }, selectedIds?: Set<string>) {
     const allModels = found.discovered.map((item) => ({ id: item.id, ownedBy: item.ownedBy, declaredContext: item.declaredContext, contextField: item.contextField, family: familyForModel(item.id), probes: {} }));
     const scopedModels = selectedIds ? allModels.filter((model) => selectedIds.has(model.id)) : allModels;
-    const limited = limitToMaxModels ? scopedModels.slice(0, Math.max(1, Number(maxModels) || 12)) : scopedModels;
-    const initialModels = limited;
+    const initialModels = scopedModels;
     setCatalogTotal(found.discovered.length);
     setCatalogModels(allModels);
     setSelectedModelIds(scopedModels.map((model) => model.id));
     setModels(initialModels);
     setSelectedModel(initialModels[0]?.id ?? null);
-    return { initialModels, limited };
+    return { initialModels };
   }
 
   async function getModelList() {
@@ -681,11 +678,10 @@ export default function Home() {
       const found = await discoverModels(controller);
       const probeKeys = probeKeysForMode(deepScan);
       if (selectedBeforeRun && !found.discovered.some((item) => selectedBeforeRun.has(item.id))) throw new Error('所选模型在最新目录中不存在，请重新获取模型列表后再试。');
-      const { initialModels, limited } = applyModelCatalog(found, true, selectedBeforeRun);
+      const { initialModels } = applyModelCatalog(found, selectedBeforeRun);
       setCatalogTotal(found.discovered.length);
       setProgressScope({ ids: initialModels.map((model) => model.id), keys: probeKeys });
       addActivity(`发现 ${found.discovered.length} 个模型 · ${found.endpoint}`, 'good');
-      if (found.discovered.length > limited.length) addActivity(`为控制请求量，本次先测试前 ${limited.length} 个模型`);
 
       for (let index = 0; index < initialModels.length; index += 1) {
         const model = initialModels[index];
@@ -859,10 +855,10 @@ export default function Home() {
       </div>
 
       <section className="workspace">
-        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} modelOptions={catalogModels.length ? catalogModels : models} selectedModelIds={selectedModelIds} deepScan={deepScan} maxModels={maxModels} running={running} fetchingModels={fetchingModels} phase={phase} progress={progress} activities={activities} onBaseUrlChange={setBaseUrl} onApiKeyChange={setApiKey} onAuthModeChange={setAuthModeValue} onManualModelsChange={setManualModels} onToggleModel={toggleModel} onSelectAllModels={selectAllModels} onClearModels={clearModels} onDeepScanChange={setDeepScan} onMaxModelsChange={setMaxModels} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
+        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} modelOptions={catalogModels.length ? catalogModels : models} selectedModelIds={selectedModelIds} deepScan={deepScan} running={running} fetchingModels={fetchingModels} phase={phase} progress={progress} activities={activities} onBaseUrlChange={setBaseUrl} onApiKeyChange={setApiKey} onAuthModeChange={setAuthModeValue} onManualModelsChange={setManualModels} onToggleModel={toggleModel} onSelectAllModels={selectAllModels} onClearModels={clearModels} onDeepScanChange={setDeepScan} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
         <section className="results-column">
           <SummaryOverview summary={summary} />
-          <ModelMatrix models={models} selectedId={selected?.id ?? null} deepScan={deepScan} catalogOnly={catalogOnly} catalogTotal={catalogTotal} maxModels={maxModels} summary={summary} error={error} running={running} onSelect={setSelectedModel} onExportJson={exportJson} onCopyMarkdown={copyMarkdown} />
+          <ModelMatrix models={models} selectedId={selected?.id ?? null} deepScan={deepScan} catalogOnly={catalogOnly} catalogTotal={catalogTotal} summary={summary} error={error} running={running} onSelect={setSelectedModel} onExportJson={exportJson} onCopyMarkdown={copyMarkdown} />
           {selected && <ModelReadout selected={selected} baseUrl={baseUrl} catalogOnly={catalogOnly} deepScan={deepScan} running={running} onTestModel={testModel} />}
         </section>
       </section>

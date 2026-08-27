@@ -134,7 +134,6 @@ export type PersistedSettings = {
   authModeValue: AuthMode;
   manualModels: string;
   deepScan: boolean;
-  maxModels: string;
   themeMode: ThemeMode;
 };
 
