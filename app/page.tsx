@@ -37,8 +37,8 @@ type ProgressScope = {
   keys: ProbeKey[];
 };
 
-const PIXEL_IMAGE =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAPElEQVR4nGOIKUilKWIYRhbIaKhQEY1aMGoB/Szo/7CfIBq1YNSCUQtGLaC1BWSjUQtGLaCJBTRCQ98CAGjOucqTgmxxAAAAAElFTkSuQmCC';
+const REQUEST_TIMEOUT_MS = 20_000;
+const DIAGNOSTIC_TIMEOUT_MS = 5_000;
 
 function nowLabel() {
   return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date());
@@ -50,12 +50,51 @@ function sleep(ms: number, signal: AbortSignal) {
       reject(new DOMException('Aborted', 'AbortError'));
       return;
     }
-    const timer = window.setTimeout(resolve, ms);
-    signal.addEventListener('abort', () => {
+    const handleAbort = () => {
       window.clearTimeout(timer);
       reject(new DOMException('Aborted', 'AbortError'));
-    }, { once: true });
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener('abort', handleAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', handleAbort, { once: true });
   });
+}
+
+function requestDeadline(url: string, parentSignal: AbortSignal, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const handleAbort = () => controller.abort(parentSignal.reason ?? new DOMException('Aborted', 'AbortError'));
+  if (parentSignal.aborted) handleAbort();
+  else parentSignal.addEventListener('abort', handleAbort, { once: true });
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort(new DOMException('Timed out', 'TimeoutError'));
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    translate(error: unknown) {
+      if (parentSignal.aborted) return new DOMException('Aborted', 'AbortError');
+      if (timedOut) return new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒）· ${safeEndpointLabel(url)}`);
+      return error;
+    },
+    cleanup() {
+      window.clearTimeout(timer);
+      parentSignal.removeEventListener('abort', handleAbort);
+    },
+  };
+}
+
+function visionProbeImage() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法生成多模态测试图片');
+  context.fillStyle = '#e53935';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/png');
 }
 
 function safeEndpointLabel(value: string) {
@@ -88,7 +127,14 @@ async function networkFailureMessage(error: unknown, url: string, signal: AbortS
   try {
     // A credential-free opaque request cannot expose response data, but it can
     // distinguish a reachable endpoint from a browser-readable CORS response.
-    await fetch(url, { method: 'GET', mode: 'no-cors', credentials: 'omit', cache: 'no-store', signal });
+    const deadline = requestDeadline(url, signal, DIAGNOSTIC_TIMEOUT_MS);
+    try {
+      await fetch(url, { method: 'GET', mode: 'no-cors', credentials: 'omit', cache: 'no-store', signal: deadline.signal });
+    } catch (error) {
+      throw deadline.translate(error);
+    } finally {
+      deadline.cleanup();
+    }
     return `${endpoint} 可达，但浏览器无法读取响应：基本可确定为 CORS / OPTIONS 预检未放行。服务端需允许 Origin ${window.location.origin}，并放行 Authorization、Content-Type、x-api-key、anthropic-version 请求头。`;
   } catch (diagnosticError) {
     if (isAbortError(diagnosticError)) throw diagnosticError;
@@ -104,6 +150,27 @@ function isAbortError(error: unknown) {
 function failedProbe(detail: string, duration: number, extra: Partial<ProbeResult> = {}): ProbeResult {
   const classified = classifyProbeFailure(detail);
   return { status: classified.status, reason: classified.reason, detail: detail.slice(0, 180), duration, ...extra };
+}
+
+function failurePriority(status?: number) {
+  return status === 401 || status === 403
+    ? 100
+    : status === 429
+      ? 95
+      : typeof status === 'number' && status >= 500
+        ? 90
+        : typeof status !== 'number'
+          ? 85
+          : status === 400 || status === 422
+            ? 80
+            : status === 404 || status === 405
+              ? 20
+              : 60;
+}
+
+function statusFromDetail(detail: string) {
+  const match = detail.match(/^(\d{3})\b/);
+  return match ? Number(match[1]) : undefined;
 }
 
 function cleanBaseUrl(value: string) {
@@ -135,17 +202,21 @@ function authHeaders(mode: AuthMode, apiKey: string, style: 'openai' | 'anthropi
   return useAnthropic ? { 'x-api-key': apiKey } : { Authorization: `Bearer ${apiKey}` };
 }
 
-function parseBody(text: string) {
+function parseBody(text: string): Record<string, unknown> {
   try {
-    return JSON.parse(text) as Record<string, unknown>;
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    if (Array.isArray(parsed)) return { data: parsed };
+    return { value: parsed };
   } catch {
     return { text };
   }
 }
 
 function responseDetail(body: Record<string, unknown>, fallback: string) {
-  const error = body.error as Record<string, unknown> | undefined;
-  const message = error?.message ?? body.message ?? body.detail;
+  const errorValue = body.error;
+  const error = errorValue && typeof errorValue === 'object' && !Array.isArray(errorValue) ? errorValue as Record<string, unknown> : undefined;
+  const message = (typeof errorValue === 'string' ? errorValue : error?.message) ?? body.message ?? body.detail;
   return typeof message === 'string' ? message.slice(0, 180) : fallback;
 }
 
@@ -153,19 +224,42 @@ function hasChatCompletion(body: Record<string, unknown>) {
   return Array.isArray(body.choices) && body.choices.length > 0;
 }
 
+function firstChatContent(body: Record<string, unknown>) {
+  const choices = Array.isArray(body.choices) ? body.choices : [];
+  const firstChoice = choices[0] && typeof choices[0] === 'object' ? choices[0] as Record<string, unknown> : undefined;
+  if (typeof firstChoice?.text === 'string') return firstChoice.text;
+  const message = firstChoice?.message && typeof firstChoice.message === 'object' ? firstChoice.message as Record<string, unknown> : undefined;
+  if (typeof message?.content === 'string') return message.content;
+  if (Array.isArray(message?.content)) {
+    return message.content.flatMap((part) => {
+      if (!part || typeof part !== 'object') return [];
+      const text = (part as Record<string, unknown>).text;
+      return typeof text === 'string' ? [text] : [];
+    }).join('');
+  }
+  return '';
+}
+
 function hasResponsesOutput(body: Record<string, unknown>) {
-  return (Array.isArray(body.output) && body.output.length > 0) || (typeof body.output_text === 'string' && body.output_text.length > 0);
+  if (typeof body.output_text === 'string' && body.output_text.trim()) return true;
+  if (!Array.isArray(body.output)) return false;
+  return body.output.some((item) => {
+    if (!item || typeof item !== 'object') return false;
+    const record = item as Record<string, unknown>;
+    return Array.isArray(record.content) && record.content.some((part) => part && typeof part === 'object' && typeof (part as Record<string, unknown>).text === 'string');
+  });
 }
 
 function hasClaudeContent(body: Record<string, unknown>) {
-  return (Array.isArray(body.content) && body.content.length > 0) || (typeof body.content === 'string' && body.content.length > 0);
+  if (typeof body.content === 'string') return body.content.trim().length > 0;
+  return Array.isArray(body.content) && body.content.some((part) => part && typeof part === 'object' && typeof (part as Record<string, unknown>).text === 'string');
 }
 
 function manualModelIds(value: string) {
-  return value
+  return [...new Set(value
     .split(/[\n,，]+/)
     .map((item) => item.trim())
-    .filter(Boolean);
+    .filter(Boolean))];
 }
 
 const CONTEXT_FIELDS = [
@@ -266,7 +360,11 @@ async function requestJson(
   style: 'openai' | 'anthropic',
   signal: AbortSignal,
 ): Promise<RequestResult> {
-  let lastFailure = '请求失败';
+  let bestFailure = { detail: '请求失败', priority: -1 };
+  const rememberFailure = (detail: string, status?: number) => {
+    const priority = failurePriority(status);
+    if (priority > bestFailure.priority) bestFailure = { detail, priority };
+  };
   for (const url of urls) {
     let retried = false;
     while (true) {
@@ -276,28 +374,38 @@ async function requestJson(
         Object.entries(authHeaders(mode, apiKey, style)).forEach(([key, value]) => headers.set(key, value));
         headers.set('Accept', 'application/json');
         if (style === 'anthropic') headers.set('anthropic-version', '2023-06-01');
-        const response = await fetch(url, { ...init, headers, signal });
-        const firstByteMs = Math.round(performance.now() - requestStarted);
-        const raw = await response.text();
+        const deadline = requestDeadline(url, signal);
+        let response: Response;
+        let raw: string;
+        let firstByteMs: number;
+        try {
+          response = await fetch(url, { ...init, headers, signal: deadline.signal });
+          firstByteMs = Math.round(performance.now() - requestStarted);
+          raw = await response.text();
+        } catch (error) {
+          throw deadline.translate(error);
+        } finally {
+          deadline.cleanup();
+        }
         const duration = Math.round(performance.now() - requestStarted);
         const body = parseBody(raw);
         if (response.ok) return { ok: true, response, body, url, firstByteMs, duration };
-        lastFailure = `${response.status} · ${responseDetail(body, response.statusText || '请求失败')}`;
+        const detail = `${response.status} · ${responseDetail(body, response.statusText || '请求失败')}`;
+        rememberFailure(detail, response.status);
         if (response.status === 429 && !retried) {
           retried = true;
           await sleep(1200, signal);
           continue;
         }
-        if (response.status !== 404 && response.status !== 405) break;
         break;
       } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') throw error;
-        lastFailure = await networkFailureMessage(error, url, signal);
+        if (isAbortError(error)) throw error;
+        rememberFailure(await networkFailureMessage(error, url, signal));
         break;
       }
     }
   }
-  return { ok: false, detail: lastFailure };
+  return { ok: false, detail: bestFailure.detail };
 }
 
 function baseJsonInit(body: Record<string, unknown>): RequestInit {
@@ -332,7 +440,7 @@ async function probeModel(
   } else if (key === 'responses') {
     result = await requestJson(
       endpointCandidates(baseUrl, '/responses'),
-      baseJsonInit({ model, input: '只回复 OK。', max_output_tokens: 12, reasoning: { effort: 'low' } }),
+      baseJsonInit({ model, input: '只回复 OK。', max_output_tokens: 12 }),
       authModeValue,
       apiKey,
       'openai',
@@ -341,7 +449,7 @@ async function probeModel(
   } else if (key === 'text') {
     result = await requestJson(
       chatUrls,
-      baseJsonInit({ model, messages: [{ role: 'user', content: '只回复 OK。' }], max_tokens: 12, temperature: 0 }),
+      baseJsonInit({ model, messages: [{ role: 'user', content: '只回复 OK。' }], max_tokens: 12 }),
       authModeValue,
       apiKey,
       'openai',
@@ -352,7 +460,7 @@ async function probeModel(
       chatUrls,
       baseJsonInit({
         model,
-        messages: [{ role: 'user', content: [{ type: 'text', text: '这张图片里有什么？只回复 pixel。' }, { type: 'image_url', image_url: { url: PIXEL_IMAGE } }] }],
+        messages: [{ role: 'user', content: [{ type: 'text', text: '图片的主色是什么？只回复一个颜色词。' }, { type: 'image_url', image_url: { url: visionProbeImage() } }] }],
         max_tokens: 12,
       }),
       authModeValue,
@@ -395,10 +503,12 @@ async function probeModel(
     headers.set('Content-Type', 'application/json');
     let lastDetail = '流式请求失败';
     for (const url of chatUrls) {
+      const deadline = requestDeadline(url, signal);
       try {
+        const requestStarted = performance.now();
         // Do not require stream_options here: many OpenAI-compatible gateways
         // support SSE but reject this optional usage-reporting parameter.
-        const response = await fetch(url, { ...baseJsonInit({ model, messages: [{ role: 'user', content: '请用一句简短的话介绍自己。' }], max_tokens: 24, stream: true }), headers, signal });
+        const response = await fetch(url, { ...baseJsonInit({ model, messages: [{ role: 'user', content: '请用一句简短的话介绍自己。' }], max_tokens: 24, stream: true }), headers, signal: deadline.signal });
         if (response.ok) {
           const reader = response.body?.getReader();
           if (!reader) {
@@ -423,7 +533,7 @@ async function probeModel(
             const delta = choices[0] && typeof choices[0] === 'object' ? (choices[0] as Record<string, unknown>).delta : undefined;
             const content = delta && typeof delta === 'object' ? (delta as Record<string, unknown>).content : undefined;
             if (typeof content === 'string' && content.length > 0) {
-              firstTokenElapsedMs ??= performance.now() - started;
+              firstTokenElapsedMs ??= performance.now() - requestStarted;
               contentChars += content.length;
             }
             const usage = payload.usage;
@@ -452,11 +562,12 @@ async function probeModel(
           await reader.cancel();
 
           if (!sawSseData || contentChars === 0 || typeof firstTokenElapsedMs !== 'number') {
-            return { status: 'warn', reason: 'partial', detail: `${Math.round(performance.now() - started)} ms · 请求成功，但没有收到可计量的文本流`, duration: Math.round(performance.now() - started), endpoint: url };
+            const duration = Math.round(performance.now() - requestStarted);
+            return { status: 'warn', reason: 'partial', detail: `${duration} ms · 请求成功，但没有收到可计量的文本流`, duration, endpoint: url };
           }
-          const duration = Math.round(performance.now() - started);
+          const duration = Math.round(performance.now() - requestStarted);
           const measuredFirstToken = Math.round(firstTokenElapsedMs);
-          const generationMs = performance.now() - started - firstTokenElapsedMs;
+          const generationMs = performance.now() - requestStarted - firstTokenElapsedMs;
           const hasReliableSpeedSample = generationMs >= 10;
           const generationSeconds = generationMs / 1000;
           const tokensPerSecond = hasReliableSpeedSample && outputTokens && outputTokens > 0 ? Number((outputTokens / generationSeconds).toFixed(1)) : undefined;
@@ -468,8 +579,11 @@ async function probeModel(
         lastDetail = `${response.status} · ${responseDetail(parseBody(raw), response.statusText || '请求失败')}`;
         if (response.status !== 404 && response.status !== 405) break;
       } catch (error) {
-        if (isAbortError(error)) throw error;
-        lastDetail = await networkFailureMessage(error, url, signal);
+        const translated = deadline.translate(error);
+        if (isAbortError(translated)) throw translated;
+        lastDetail = await networkFailureMessage(translated, url, signal);
+      } finally {
+        deadline.cleanup();
       }
     }
     return failedProbe(lastDetail, Math.round(performance.now() - started));
@@ -479,6 +593,23 @@ async function probeModel(
   if (result.ok) {
     if ((key === 'text' || key === 'vision' || key === 'json') && !hasChatCompletion(result.body)) {
       return { status: 'warn', reason: 'partial', detail: `${duration} ms · HTTP 成功，但响应结构中没有可识别的 choices`, duration, endpoint: result.url };
+    }
+    if (key === 'text' && !firstChatContent(result.body).trim()) {
+      return { status: 'warn', reason: 'partial', detail: `${duration} ms · HTTP 成功，但没有可识别的文本内容`, duration, endpoint: result.url };
+    }
+    if (key === 'vision') {
+      const answer = firstChatContent(result.body).trim().toLowerCase();
+      if (!answer.includes('红') && !answer.includes('red')) {
+        return { status: 'warn', reason: 'partial', detail: `${duration} ms · 已接受图片输入，但未正确识别测试图的红色主色`, duration, endpoint: result.url };
+      }
+    }
+    if (key === 'json') {
+      const content = firstChatContent(result.body).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+      try {
+        JSON.parse(content);
+      } catch {
+        return { status: 'warn', reason: 'partial', detail: `${duration} ms · 已接受 JSON mode，但返回内容不是有效 JSON`, duration, endpoint: result.url };
+      }
     }
     if (key === 'responses' && !hasResponsesOutput(result.body)) {
       return { status: 'warn', reason: 'partial', detail: `${duration} ms · HTTP 成功，但响应结构中没有可识别的 output`, duration, endpoint: result.url };
@@ -493,6 +624,11 @@ async function probeModel(
       const toolCalls = message?.tool_calls;
       if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
         return { status: 'warn', reason: 'partial', detail: `${duration} ms · 请求被接受，但响应没有返回 tool_calls`, duration, endpoint: result.url };
+      }
+      const firstCall = toolCalls[0] && typeof toolCalls[0] === 'object' ? toolCalls[0] as Record<string, unknown> : undefined;
+      const fn = firstCall?.function && typeof firstCall.function === 'object' ? firstCall.function as Record<string, unknown> : undefined;
+      if (fn?.name !== 'get_weather') {
+        return { status: 'warn', reason: 'partial', detail: `${duration} ms · 返回了 tool_calls，但没有调用测试函数 get_weather`, duration, endpoint: result.url };
       }
     }
     return { status: 'pass', detail: `${duration} ms · HTTP ${result.response?.status ?? 200}`, duration, endpoint: result.url };
@@ -521,15 +657,23 @@ export default function Home() {
   const [hydrated, setHydrated] = useState(false);
   const [progressScope, setProgressScope] = useState<ProgressScope | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const busyRef = useRef(false);
 
   useEffect(() => {
-    const saved = loadSettings();
-    if (typeof saved.baseUrl === 'string' && saved.baseUrl) setBaseUrl(saved.baseUrl);
-    if (saved.authModeValue === 'auto' || saved.authModeValue === 'bearer' || saved.authModeValue === 'x-api-key' || saved.authModeValue === 'none') setAuthModeValue(saved.authModeValue);
-    if (typeof saved.manualModels === 'string') setManualModels(saved.manualModels);
-    if (typeof saved.deepScan === 'boolean') setDeepScan(saved.deepScan);
-    if (saved.themeMode === 'system' || saved.themeMode === 'light' || saved.themeMode === 'dark') setThemeMode(saved.themeMode);
-    setHydrated(true);
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      const saved = loadSettings();
+      if (typeof saved.baseUrl === 'string' && saved.baseUrl) setBaseUrl(saved.baseUrl);
+      if (saved.authModeValue === 'auto' || saved.authModeValue === 'bearer' || saved.authModeValue === 'x-api-key' || saved.authModeValue === 'none') setAuthModeValue(saved.authModeValue);
+      if (typeof saved.manualModels === 'string') setManualModels(saved.manualModels);
+      if (typeof saved.deepScan === 'boolean') setDeepScan(saved.deepScan);
+      if (saved.themeMode === 'system' || saved.themeMode === 'light' || saved.themeMode === 'dark') setThemeMode(saved.themeMode);
+      setHydrated(true);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -571,6 +715,31 @@ export default function Home() {
     setActivities((current) => [{ time: nowLabel(), message, tone }, ...current].slice(0, 12));
   }
 
+  function invalidateCatalog() {
+    setCatalogModels([]);
+    setSelectedModelIds([]);
+  }
+
+  function handleBaseUrlChange(value: string) {
+    setBaseUrl(value);
+    invalidateCatalog();
+  }
+
+  function handleApiKeyChange(value: string) {
+    setApiKey(value);
+    invalidateCatalog();
+  }
+
+  function handleAuthModeChange(value: AuthMode) {
+    setAuthModeValue(value);
+    invalidateCatalog();
+  }
+
+  function handleManualModelsChange(value: string) {
+    setManualModels(value);
+    invalidateCatalog();
+  }
+
   function updateModel(id: string, key: ProbeKey, probe: ProbeResult) {
     setModels((current) => current.map((model) => model.id === id ? { ...model, probes: { ...model.probes, [key]: probe } } : model));
   }
@@ -599,24 +768,32 @@ export default function Home() {
 
   async function discoverModels(controller: AbortController): Promise<{ discovered: DiscoveredModel[]; endpoint: string }> {
     const urls = modelEndpointCandidates(baseUrl);
-    const styles: Array<'openai' | 'anthropic'> = authModeValue === 'auto' ? ['openai', 'anthropic'] : ['openai'];
-    let lastFailure = '无法识别模型列表';
+    const styles: Array<'openai' | 'anthropic'> = authModeValue === 'auto' && apiKey ? ['openai', 'anthropic'] : ['openai'];
+    const manualIds = manualModelIds(manualModels).map((id) => ({ id, ownedBy: undefined as string | undefined, declaredContext: undefined as number | undefined, contextField: undefined as string | undefined }));
+    let bestFailure = { detail: '无法识别模型列表', priority: -1 };
+    const rememberFailure = (detail: string, priority = failurePriority(statusFromDetail(detail))) => {
+      if (priority > bestFailure.priority) bestFailure = { detail, priority };
+    };
     for (const style of styles) {
       for (const url of urls) {
         const result = await requestJson([url], { method: 'GET' }, authModeValue, apiKey, style, controller.signal);
         if (!result.ok) {
-          lastFailure = result.detail;
+          rememberFailure(result.detail);
+          if (classifyProbeFailure(result.detail).reason === 'network') {
+            if (manualIds.length) return { discovered: manualIds, endpoint: '手动输入' };
+            if (!result.detail.includes('可达，但浏览器无法读取响应')) throw new Error(result.detail);
+            break;
+          }
           continue;
         }
         const discovered = extractModels(result.body);
         if (discovered.length) return { discovered, endpoint: result.url };
-        lastFailure = `接口返回成功，但 ${url} 的响应中没有识别到模型条目`;
+        rememberFailure(`接口返回成功，但 ${url} 的响应中没有识别到模型条目`, 110);
       }
     }
 
-    const ids = manualModelIds(manualModels).map((id) => ({ id, ownedBy: undefined as string | undefined, declaredContext: undefined as number | undefined, contextField: undefined as string | undefined }));
-    if (ids.length) return { discovered: ids, endpoint: '手动输入' };
-    const failure = lastFailure.replace(/[。！？.!?]+$/u, '');
+    if (manualIds.length) return { discovered: manualIds, endpoint: '手动输入' };
+    const failure = bestFailure.detail.replace(/[。！？.!?]+$/u, '');
     throw new Error(`${failure}。已尝试 /models、/v1/models 及常见兼容路径；也可在“手动模型 ID”中填写模型。`);
   }
 
@@ -627,7 +804,19 @@ export default function Home() {
       return undefined;
     }
     try {
-      new URL(trimmedBase);
+      const parsed = new URL(trimmedBase);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        setError('API Base URL 只支持 HTTP 或 HTTPS 地址。');
+        return undefined;
+      }
+      if (parsed.username || parsed.password) {
+        setError('请不要把账号或密钥写在 URL 中，请使用下方 API Key 输入框。');
+        return undefined;
+      }
+      if (parsed.search || parsed.hash) {
+        setError('API Base URL 不应包含查询参数或 # 片段，请只填写接口根路径。');
+        return undefined;
+      }
     } catch {
       setError('API Base URL 不是有效的网址。');
       return undefined;
@@ -635,8 +824,17 @@ export default function Home() {
     return trimmedBase;
   }
 
-  function applyModelCatalog(found: { discovered: DiscoveredModel[]; endpoint: string }, selectedIds?: Set<string>) {
-    const allModels = found.discovered.map((item) => ({ id: item.id, ownedBy: item.ownedBy, declaredContext: item.declaredContext, contextField: item.contextField, family: familyForModel(item.id), probes: {} }));
+  function applyModelCatalog(found: { discovered: DiscoveredModel[]; endpoint: string }, selectedIds?: Set<string>, expectedProbes?: ProbeKey[], testedBaseUrl?: string) {
+    const allModels = found.discovered.map((item) => ({
+      id: item.id,
+      ownedBy: item.ownedBy,
+      declaredContext: item.declaredContext,
+      contextField: item.contextField,
+      family: familyForModel(item.id),
+      expectedProbes,
+      testedBaseUrl,
+      probes: {},
+    }));
     const scopedModels = selectedIds ? allModels.filter((model) => selectedIds.has(model.id)) : allModels;
     const initialModels = scopedModels;
     setCatalogTotal(found.discovered.length);
@@ -648,13 +846,15 @@ export default function Home() {
   }
 
   async function getModelList() {
-    if (running || fetchingModels) return;
+    if (busyRef.current || running || fetchingModels) return;
     const trimmedBase = validateBaseUrl();
     if (!trimmedBase) return;
 
     const controller = new AbortController();
+    busyRef.current = true;
     abortRef.current = controller;
     setFetchingModels(true);
+    setError('');
     setActivities([]);
     setPhase('读取模型目录');
     addActivity('开始读取模型列表');
@@ -673,17 +873,19 @@ export default function Home() {
         addActivity('用户中止了模型列表获取');
       } else {
         const message = caught instanceof Error ? caught.message : '未知错误';
+        setError(message);
         setPhase('获取中断');
         addActivity(message, 'bad');
       }
     } finally {
+      busyRef.current = false;
       setFetchingModels(false);
-      abortRef.current = null;
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }
 
   async function runHealthCheck() {
-    if (running || fetchingModels) return;
+    if (busyRef.current || running || fetchingModels) return;
     if (catalogModels.length > 0 && selectedModelIds.length === 0) {
       setError('请至少选择一个模型后再开始一键体检。');
       return;
@@ -692,6 +894,7 @@ export default function Home() {
     if (!trimmedBase) return;
 
     const controller = new AbortController();
+    busyRef.current = true;
     abortRef.current = controller;
     setRunning(true);
     setError('');
@@ -707,10 +910,15 @@ export default function Home() {
     addActivity('开始连接模型 API');
 
     try {
-      const found = await discoverModels(controller);
+      const found = hasExistingCatalog
+        ? {
+          discovered: catalogModels.map((model) => ({ id: model.id, ownedBy: model.ownedBy, declaredContext: model.declaredContext, contextField: model.contextField })),
+          endpoint: '已获取模型列表',
+        }
+        : await discoverModels(controller);
       const probeKeys = probeKeysForMode(deepScan);
       if (selectedBeforeRun && !found.discovered.some((item) => selectedBeforeRun.has(item.id))) throw new Error('所选模型在最新目录中不存在，请重新获取模型列表后再试。');
-      const { initialModels } = applyModelCatalog(found, selectedBeforeRun);
+      const { initialModels } = applyModelCatalog(found, selectedBeforeRun, probeKeys, trimmedBase);
       setCatalogTotal(found.discovered.length);
       setProgressScope({ ids: initialModels.map((model) => model.id), keys: probeKeys });
       addActivity(`发现 ${found.discovered.length} 个模型 · ${found.endpoint}`, 'good');
@@ -734,8 +942,9 @@ export default function Home() {
         addActivity(message, 'bad');
       }
     } finally {
+      busyRef.current = false;
       setRunning(false);
-      abortRef.current = null;
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }
 
@@ -757,19 +966,20 @@ export default function Home() {
   }
 
   async function testModel(id: string) {
-    if (running) return;
+    if (busyRef.current || running || fetchingModels) return;
     if (!models.some((model) => model.id === id)) return;
     const trimmedBase = validateBaseUrl();
     if (!trimmedBase) return;
 
     const controller = new AbortController();
+    busyRef.current = true;
     abortRef.current = controller;
     setRunning(true);
     setError('');
     setCatalogOnly(false);
     setSelectedModel(id);
     const probeKeys = probeKeysForMode(deepScan);
-    setModels((current) => current.map((model) => model.id === id ? { ...model, probes: {} } : model));
+    setModels((current) => current.map((model) => model.id === id ? { ...model, expectedProbes: probeKeys, testedBaseUrl: trimmedBase, probes: {} } : model));
     setProgressScope({ ids: [id], keys: probeKeys });
     setPhase(`测试 ${id}`);
     addActivity(`开始单独测试 ${id}`);
@@ -789,16 +999,19 @@ export default function Home() {
         addActivity(message, 'bad');
       }
     } finally {
+      busyRef.current = false;
       setRunning(false);
-      abortRef.current = null;
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }
 
   function reportPayload() {
+    const testedBaseUrls = [...new Set(models.flatMap((model) => model.testedBaseUrl ? [model.testedBaseUrl] : []))];
+    const scanModes = new Set(models.flatMap((model) => model.expectedProbes?.length ? [model.expectedProbes.length > 2 ? 'deep' : 'quick'] : []));
     return {
       generatedAt: new Date().toISOString(),
-      baseUrl: cleanBaseUrl(baseUrl),
-      mode: catalogOnly ? 'catalog' : deepScan ? 'deep' : 'quick',
+      baseUrl: testedBaseUrls.length === 1 ? testedBaseUrls[0] : testedBaseUrls.length > 1 ? 'mixed' : cleanBaseUrl(baseUrl),
+      mode: catalogOnly ? 'catalog' : scanModes.size > 1 ? 'mixed' : [...scanModes][0] ?? (deepScan ? 'deep' : 'quick'),
       catalogTotal,
       summary,
       models: models.map((model) => ({
@@ -807,6 +1020,8 @@ export default function Home() {
         ownedBy: model.ownedBy,
         declaredContext: model.declaredContext,
         contextField: model.contextField,
+        expectedProbes: model.expectedProbes,
+        testedBaseUrl: model.testedBaseUrl,
         probes: model.probes,
       })),
     };
@@ -887,11 +1102,11 @@ export default function Home() {
       </div>
 
       <section className="workspace">
-        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} modelOptions={catalogModels.length ? catalogModels : models} selectedModelIds={selectedModelIds} deepScan={deepScan} running={running} fetchingModels={fetchingModels} phase={phase} progress={progress} activities={activities} onBaseUrlChange={setBaseUrl} onApiKeyChange={setApiKey} onAuthModeChange={setAuthModeValue} onManualModelsChange={setManualModels} onToggleModel={toggleModel} onSelectAllModels={selectAllModels} onClearModels={clearModels} onDeepScanChange={setDeepScan} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
+        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} modelOptions={catalogModels} selectedModelIds={selectedModelIds} deepScan={deepScan} running={running} fetchingModels={fetchingModels} ready={hydrated} phase={phase} progress={progress} activities={activities} onBaseUrlChange={handleBaseUrlChange} onApiKeyChange={handleApiKeyChange} onAuthModeChange={handleAuthModeChange} onManualModelsChange={handleManualModelsChange} onToggleModel={toggleModel} onSelectAllModels={selectAllModels} onClearModels={clearModels} onDeepScanChange={setDeepScan} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
         <section className="results-column">
           <SummaryOverview summary={summary} />
           <ModelMatrix models={models} selectedId={selected?.id ?? null} deepScan={deepScan} catalogOnly={catalogOnly} catalogTotal={catalogTotal} summary={summary} error={error} running={running} onSelect={setSelectedModel} onExportJson={exportJson} onCopyMarkdown={copyMarkdown} />
-          {selected && <ModelReadout selected={selected} baseUrl={baseUrl} catalogOnly={catalogOnly} deepScan={deepScan} running={running} onTestModel={testModel} />}
+          {selected && <ModelReadout selected={selected} baseUrl={baseUrl} catalogOnly={catalogOnly} deepScan={deepScan} running={running} fetchingModels={fetchingModels} onTestModel={testModel} />}
         </section>
       </section>
 

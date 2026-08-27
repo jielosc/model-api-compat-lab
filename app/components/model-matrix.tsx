@@ -41,8 +41,18 @@ export function ModelMatrix({
   onCopyMarkdown,
 }: ModelMatrixProps) {
   const [query, setQuery] = useState('');
-  const activeKeyList = useMemo(() => probeKeysForMode(deepScan), [deepScan]);
+  const configuredKeyList = useMemo(() => probeKeysForMode(deepScan), [deepScan]);
+  const activeKeyList = useMemo(() => {
+    const testedKeys = models.flatMap((model) => model.expectedProbes ?? []);
+    return testedKeys.length ? [...new Set(testedKeys)] : configuredKeyList;
+  }, [configuredKeyList, models]);
   const activeKeys = useMemo(() => new Set<ProbeKey>(activeKeyList), [activeKeyList]);
+  const scanLabel = useMemo(() => {
+    if (catalogOnly) return 'MODEL LIST ONLY';
+    const modes = new Set(models.flatMap((model) => model.expectedProbes?.length ? [model.expectedProbes.length > 2 ? 'DEEP SCAN' : 'QUICK SCAN'] : []));
+    if (modes.size > 1) return 'MIXED SCAN';
+    return [...modes][0] ?? (deepScan ? 'DEEP SCAN' : 'QUICK SCAN');
+  }, [catalogOnly, deepScan, models]);
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return models;
@@ -58,7 +68,7 @@ export function ModelMatrix({
       <div className="panel-heading results-heading">
         <div><span className="section-index">B / INVENTORY & PROBES</span><h2>模型能力矩阵</h2></div>
         <div className="results-meta">
-          <span>{catalogOnly ? 'MODEL LIST ONLY' : deepScan ? 'DEEP SCAN' : 'QUICK SCAN'}</span>
+          <span>{scanLabel}</span>
           <span className="meta-divider" />
           <span>{catalogOnly ? `${catalogTotal} MODELS` : `${summary.passed}/${summary.tested || 0} PASS`}</span>
         </div>
@@ -108,7 +118,8 @@ export function ModelMatrix({
               </thead>
               <tbody>
                 {filtered.map((model) => {
-                  const overall = overallForModel(model, catalogOnly ? undefined : activeKeyList);
+                  const expectedKeys = model.expectedProbes ?? activeKeyList;
+                  const overall = overallForModel(model, catalogOnly ? undefined : expectedKeys);
                   return (
                     <tr
                       key={model.id}
@@ -134,7 +145,7 @@ export function ModelMatrix({
                       </td>
                       {PROBES.map((probe) => {
                         const result = model.probes[probe.key];
-                        const inactive = !catalogOnly && !activeKeys.has(probe.key) && !result;
+                        const inactive = !catalogOnly && !new Set(expectedKeys).has(probe.key) && !result;
                         return (
                           <td key={probe.key} className={inactive ? 'probe-col-inactive' : undefined}>
                             {result ? (

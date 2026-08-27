@@ -22,6 +22,8 @@ export type ModelResult = {
   family: string;
   declaredContext?: number;
   contextField?: string;
+  expectedProbes?: ProbeKey[];
+  testedBaseUrl?: string;
   probes: Partial<Record<ProbeKey, ProbeResult>>;
 };
 

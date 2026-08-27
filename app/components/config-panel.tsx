@@ -14,6 +14,7 @@ type ConfigPanelProps = {
   deepScan: boolean;
   running: boolean;
   fetchingModels: boolean;
+  ready: boolean;
   phase: string;
   progress: number;
   activities: Activity[];
@@ -40,6 +41,7 @@ export function ConfigPanel({
   deepScan,
   running,
   fetchingModels,
+  ready,
   phase,
   progress,
   activities,
@@ -59,6 +61,7 @@ export function ConfigPanel({
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelQuery, setModelQuery] = useState('');
   const pickerRef = useRef<HTMLDivElement>(null);
+  const busy = !ready || running || fetchingModels;
 
   useEffect(() => {
     if (!modelPickerOpen) return;
@@ -102,26 +105,26 @@ export function ConfigPanel({
       </div>
 
       <label className="field-label" htmlFor="base-url">API Base URL</label>
-      <div className="input-wrap url-wrap"><span className="input-prefix">↗</span><input id="base-url" value={baseUrl} onChange={(event) => onBaseUrlChange(event.target.value)} placeholder="https://api.example.com/v1" /></div>
+      <div className="input-wrap url-wrap"><span className="input-prefix">↗</span><input id="base-url" value={baseUrl} onChange={(event) => onBaseUrlChange(event.target.value)} placeholder="https://api.example.com/v1" disabled={busy} /></div>
       <div className="hint">支持 OpenAI-compatible、Anthropic-compatible 代理。可填到 `/v1`。刷新后会记住地址，不会记住 Key。</div>
 
       <label className="field-label" htmlFor="api-key">API Key</label>
-      <div className="input-wrap"><span className="input-prefix key-prefix">KEY</span><input id="api-key" type="password" value={apiKey} onChange={(event) => onApiKeyChange(event.target.value)} placeholder="sk-… / 你的访问密钥" autoComplete="off" /></div>
+      <div className="input-wrap"><span className="input-prefix key-prefix">KEY</span><input id="api-key" type="password" value={apiKey} onChange={(event) => onApiKeyChange(event.target.value)} placeholder="sk-… / 你的访问密钥" autoComplete="off" disabled={busy} /></div>
 
       <div className="field-label">鉴权方案</div>
       <div className="segmented" role="radiogroup" aria-label="鉴权方案">
         {([['auto', '自动'], ['bearer', 'Bearer'], ['x-api-key', 'x-api-key'], ['none', '无 Key']] as Array<[AuthMode, string]>).map(([value, label]) => (
-          <button key={value} className={authModeValue === value ? 'selected' : ''} onClick={() => onAuthModeChange(value)} type="button" role="radio" aria-checked={authModeValue === value}>{label}</button>
+          <button key={value} className={authModeValue === value ? 'selected' : ''} onClick={() => onAuthModeChange(value)} type="button" role="radio" aria-checked={authModeValue === value} disabled={busy}>{label}</button>
         ))}
       </div>
 
       <div className="manual-model-heading">
         <label className="field-label" htmlFor="manual-models">手动模型 ID <span>可选</span></label>
-        <button className="inline-action" type="button" onClick={onGetModelList} disabled={running || fetchingModels}>
-          <span>≡</span> {fetchingModels ? '获取中…' : '获取列表'}
+        <button className="inline-action" type="button" onClick={fetchingModels ? onStopHealthCheck : onGetModelList} disabled={!ready || running}>
+          <span>{fetchingModels ? '■' : '≡'}</span> {fetchingModels ? '取消获取' : '获取列表'}
         </button>
       </div>
-      <textarea id="manual-models" value={manualModels} onChange={(event) => onManualModelsChange(event.target.value)} placeholder={'服务不提供模型列表时填写，例如：\ngpt-4o, claude-3-5-sonnet'} rows={3} />
+      <textarea id="manual-models" value={manualModels} onChange={(event) => onManualModelsChange(event.target.value)} placeholder={'服务不提供模型列表时填写，例如：\ngpt-4o, claude-3-5-sonnet'} rows={3} disabled={busy} />
 
       {modelOptions.length > 0 && (
         <div className="model-picker" ref={pickerRef}>
@@ -173,13 +176,13 @@ export function ConfigPanel({
       <div className="scan-options">
         <div className="scan-mode-title"><strong>扫描模式</strong><small>先选模式，再开始测试</small></div>
         <div className="scan-mode-selector" role="radiogroup" aria-label="扫描模式">
-          <button type="button" role="radio" className={!deepScan ? 'selected' : ''} aria-checked={!deepScan} onClick={() => onDeepScanChange(false)}><span className="mode-mark">01</span><span><strong>快速模式</strong><small>2 个低成本请求 · 文本 + 流式</small></span></button>
-          <button type="button" role="radio" className={deepScan ? 'selected' : ''} aria-checked={deepScan} onClick={() => onDeepScanChange(true)}><span className="mode-mark">02</span><span><strong>深度模式</strong><small>最多 7 个请求 · 全部能力探测</small></span></button>
+          <button type="button" role="radio" className={!deepScan ? 'selected' : ''} aria-checked={!deepScan} onClick={() => onDeepScanChange(false)} disabled={busy}><span className="mode-mark">01</span><span><strong>快速模式</strong><small>2 个低成本请求 · 文本 + 流式</small></span></button>
+          <button type="button" role="radio" className={deepScan ? 'selected' : ''} aria-checked={deepScan} onClick={() => onDeepScanChange(true)} disabled={busy}><span className="mode-mark">02</span><span><strong>深度模式</strong><small>最多 7 个请求 · 全部能力探测</small></span></button>
         </div>
       </div>
 
       <div className="action-stack">
-        {running ? <button className="primary-button stop-button" type="button" onClick={onStopHealthCheck}><span className="button-icon">■</span> 停止本次探测</button> : <button className="primary-button" type="button" onClick={onRunHealthCheck} disabled={fetchingModels}><span className="button-icon">↗</span> {fetchingModels ? '获取模型列表中…' : '开始一键体检'}</button>}
+        {running ? <button className="primary-button stop-button" type="button" onClick={onStopHealthCheck}><span className="button-icon">■</span> 停止本次探测</button> : <button className="primary-button" type="button" onClick={onRunHealthCheck} disabled={!ready || fetchingModels}><span className="button-icon">↗</span> {fetchingModels ? '获取模型列表中…' : '开始一键体检'}</button>}
       </div>
       <div className="privacy-note"><span>◌</span><p>Key 仅用于当前页面的 fetch 请求，刷新页面即清除。请确认目标 API 允许浏览器跨域访问。</p></div>
 

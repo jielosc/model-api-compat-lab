@@ -11,13 +11,16 @@ type ModelReadoutProps = {
   catalogOnly: boolean;
   deepScan: boolean;
   running: boolean;
+  fetchingModels: boolean;
   onTestModel: (id: string) => void;
 };
 
-export function ModelReadout({ selected, baseUrl, catalogOnly, deepScan, running, onTestModel }: ModelReadoutProps) {
+export function ModelReadout({ selected, baseUrl, catalogOnly, deepScan, running, fetchingModels, onTestModel }: ModelReadoutProps) {
   const [copied, setCopied] = useState(false);
-  const overall = overallForModel(selected, catalogOnly ? undefined : probeKeysForMode(deepScan));
-  const root = baseUrl.trim().replace(/\/+$/, '');
+  const expectedKeys = selected.expectedProbes ?? probeKeysForMode(deepScan);
+  const overall = overallForModel(selected, catalogOnly ? undefined : expectedKeys);
+  const root = (selected.testedBaseUrl ?? baseUrl).trim().replace(/\/+$/, '');
+  const resultWasDeep = expectedKeys.length > 2;
 
   async function copyId() {
     const ok = await copyText(selected.id);
@@ -35,8 +38,8 @@ export function ModelReadout({ selected, baseUrl, catalogOnly, deepScan, running
         </div>
         <div className="detail-actions">
           <button type="button" className="ghost-button" onClick={copyId}>{copied ? '已复制 ID' : '复制 ID'}</button>
-          <button type="button" className="ghost-button" onClick={() => onTestModel(selected.id)} disabled={running}>
-            {running ? '测试中…' : '测试此模型'}
+          <button type="button" className="ghost-button" onClick={() => onTestModel(selected.id)} disabled={running || fetchingModels}>
+            {running ? '测试中…' : fetchingModels ? '获取列表中…' : '测试此模型'}
           </button>
           <span className={`detail-status ${overall}`}>{readoutStatus(overall, catalogOnly)}</span>
         </div>
@@ -66,7 +69,7 @@ export function ModelReadout({ selected, baseUrl, catalogOnly, deepScan, running
                   ? `${statusLabel(result.status)} · ${result.detail}`
                   : catalogOnly
                     ? '尚未发起能力测试'
-                    : `${deepScan ? '深度' : '快速'}模式未执行此项`}
+                    : `${resultWasDeep ? '深度' : '快速'}模式未执行此项`}
               </small>
               {result?.endpoint && <code>{result.endpoint.replace(root, '…')}</code>}
             </div>

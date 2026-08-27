@@ -102,7 +102,7 @@ export function classifyProbeFailure(detail: string): { status: Extract<ProbeSta
   if (/\b429\b|rate limit|too many requests|quota|限流/.test(text)) {
     return { status: 'fail', reason: 'rate_limit' };
   }
-  if (/cors|failed to fetch|networkerror|load failed|not allowed|unreachable|network request|网络请求失败|跨域/.test(text)) {
+  if (/cors|failed to fetch|networkerror|load failed|not allowed|unreachable|network request|timed? out|timeout|网络请求失败|跨域|请求超时/.test(text)) {
     return { status: 'fail', reason: 'network' };
   }
   if (/^(400|404|405)\b|not found|unknown model|does not support|unsupported|invalid.*request/.test(text)) {
@@ -162,8 +162,10 @@ export function downloadText(filename: string, content: string, type = 'applicat
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
+  document.body.appendChild(link);
   link.click();
-  URL.revokeObjectURL(url);
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export async function copyText(value: string) {
