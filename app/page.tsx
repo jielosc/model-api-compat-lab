@@ -1,34 +1,17 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
-
-type ProbeKey = 'text' | 'vision' | 'tools' | 'json' | 'stream' | 'responses' | 'claude';
-type ProbeStatus = 'idle' | 'running' | 'pass' | 'warn' | 'fail';
-type AuthMode = 'auto' | 'bearer' | 'x-api-key' | 'none';
-
-type ProbeResult = {
-  status: ProbeStatus;
-  detail: string;
-  duration?: number;
-  firstTokenMs?: number;
-  tokensPerSecond?: number;
-  charsPerSecond?: number;
-  outputTokens?: number;
-  endpoint?: string;
-};
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ConfigPanel } from './components/config-panel';
+import { ModelMatrix } from './components/model-matrix';
+import { ModelReadout } from './components/model-readout';
+import { PROBES } from './components/probes';
+import { SummaryOverview } from './components/summary-overview';
+import { ThemeToggle } from './components/theme-toggle';
+import type { Activity, AuthMode, ModelResult, ProbeKey, ProbeResult, ThemeMode } from './components/types';
 
 type RequestResult =
   | { ok: true; response: Response; body: Record<string, unknown>; url: string; firstByteMs: number; duration: number }
   | { ok: false; detail: string };
-
-type ModelResult = {
-  id: string;
-  ownedBy?: string;
-  family: string;
-  declaredContext?: number;
-  contextField?: string;
-  probes: Partial<Record<ProbeKey, ProbeResult>>;
-};
 
 type DiscoveredModel = {
   id: string;
@@ -37,21 +20,6 @@ type DiscoveredModel = {
   contextField?: string;
 };
 
-type Activity = {
-  time: string;
-  message: string;
-  tone: 'neutral' | 'good' | 'bad';
-};
-
-const PROBES: Array<{ key: ProbeKey; label: string; short: string; description: string }> = [
-  { key: 'text', label: '文本对话', short: 'TEXT', description: 'Chat Completions 基础调用' },
-  { key: 'vision', label: '多模态', short: 'VISION', description: '图像输入 + 文本输出' },
-  { key: 'tools', label: '工具调用', short: 'TOOLS', description: 'Function / tool calling' },
-  { key: 'json', label: '结构化输出', short: 'JSON', description: 'JSON mode / response_format' },
-  { key: 'stream', label: '流式输出', short: 'STREAM', description: 'SSE streaming' },
-  { key: 'responses', label: 'Codex / Responses', short: 'RESPONSES', description: 'OpenAI Responses API' },
-  { key: 'claude', label: 'Claude Code', short: 'CLAUDE', description: 'Anthropic Messages API' },
-];
 
 const PIXEL_IMAGE =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAPElEQVR4nGOIKUilKWIYRhbIaKhQEY1aMGoB/Szo/7CfIBq1YNSCUQtGLaC1BWSjUQtGLaCJBTRCQ98CAGjOucqTgmxxAAAAAElFTkSuQmCC';
@@ -211,13 +179,6 @@ function extractModels(body: unknown): DiscoveredModel[] {
     });
   }
   return [...unique.values()];
-}
-
-function formatContext(value?: number) {
-  if (!value) return '—';
-  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`;
-  if (value >= 1_000) return `${Number((value / 1_000).toFixed(1))}K`;
-  return String(value);
 }
 
 async function requestJson(
@@ -425,23 +386,6 @@ async function probeModel(
   return { status: isUnsupported ? 'warn' : 'fail', detail: result.detail?.slice(0, 180) ?? '请求失败', duration };
 }
 
-function statusLabel(status: ProbeStatus) {
-  if (status === 'pass') return '通过';
-  if (status === 'warn') return '不支持';
-  if (status === 'fail') return '失败';
-  if (status === 'running') return '测试中';
-  return '未测';
-}
-
-function overallForModel(model: ModelResult) {
-  const values = Object.values(model.probes);
-  if (!values.length) return 'idle';
-  if (values.some((probe) => probe?.status === 'fail')) return 'fail';
-  if (values.some((probe) => probe?.status === 'warn')) return 'warn';
-  if (values.every((probe) => probe?.status === 'pass')) return 'pass';
-  return 'running';
-}
-
 export default function Home() {
   const [baseUrl, setBaseUrl] = useState('https://api.openai.com/v1');
   const [apiKey, setApiKey] = useState('');
@@ -457,7 +401,14 @@ export default function Home() {
   const [running, setRunning] = useState(false);
   const [phase, setPhase] = useState('等待接入');
   const [error, setError] = useState('');
+  const [themeMode, setThemeMode] = useState<ThemeMode>('system');
   const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (themeMode === 'system') root.removeAttribute('data-theme');
+    else root.setAttribute('data-theme', themeMode);
+  }, [themeMode]);
 
   const selected = models.find((model) => model.id === selectedModel) ?? models[0];
   const summary = useMemo(() => {
@@ -646,104 +597,30 @@ export default function Home() {
             <div className="brand-name">模型 API 体检台</div>
           </div>
         </div>
-        <div className="topbar-note"><span className="live-dot" /> 浏览器直连 · 密钥不落盘</div>
+        <div className="topbar-tools"><ThemeToggle value={themeMode} onChange={setThemeMode} /><div className="topbar-note"><span className="live-dot" /> 浏览器直连 · 密钥不落盘</div></div>
       </header>
 
       <section className="hero">
         <div>
           <div className="eyebrow accent">API 能力边界扫描器</div>
           <h1>先找到模型，<em>再知道它能做什么。</em></h1>
-          <p>一次接入，快速盘点模型目录，并用真实请求探测文本、多模态、工具调用、流式输出，以及 Codex / Claude Code 所需的协议兼容性。</p>
+          <p>一次接入，先获取模型目录；再用快速或深度模式，探测文本、多模态、工具调用、流式输出，以及 Codex / Claude Code 所需的协议兼容性。</p>
         </div>
-        <div className="hero-stamp">
-          <span className="stamp-number">{summary.total ? String(summary.total).padStart(2, '0') : '—'}</span>
-          <span className="stamp-label">MODELS<br />IN SCOPE</span>
-        </div>
+        <div className="hero-stamp"><span className="stamp-number">{summary.total ? String(summary.total).padStart(2, '0') : '—'}</span><span className="stamp-label">MODELS<br />IN SCOPE</span></div>
       </section>
 
       <div className="steps" aria-label="检测流程">
-        <div className="step active"><span>01</span><strong>接入</strong><small>Base URL + Key</small></div>
-        <div className="step-line" />
-        <div className={`step ${models.length ? 'active' : ''}`}><span>02</span><strong>发现</strong><small>/models catalog</small></div>
-        <div className="step-line" />
+        <div className="step active"><span>01</span><strong>接入</strong><small>Base URL + Key</small></div><div className="step-line" />
+        <div className={`step ${models.length ? 'active' : ''}`}><span>02</span><strong>发现</strong><small>/models catalog</small></div><div className="step-line" />
         <div className={`step ${summary.tested ? 'active' : ''}`}><span>03</span><strong>边界</strong><small>capability probes</small></div>
       </div>
 
       <section className="workspace">
-        <aside className="config-panel panel">
-          <div className="panel-heading">
-            <div><span className="section-index">A / CONNECT</span><h2>接入配置</h2></div>
-            <span className="lock-label">LOCAL ONLY</span>
-          </div>
-
-          <label className="field-label" htmlFor="base-url">API Base URL</label>
-          <div className="input-wrap url-wrap"><span className="input-prefix">↗</span><input id="base-url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" /></div>
-          <div className="hint">支持 OpenAI-compatible、Anthropic-compatible 代理。可填到 `/v1`。</div>
-
-          <label className="field-label" htmlFor="api-key">API Key</label>
-          <div className="input-wrap"><span className="input-prefix key-prefix">KEY</span><input id="api-key" type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="sk-… / 你的访问密钥" autoComplete="off" /></div>
-
-          <div className="field-label">鉴权方案</div>
-          <div className="segmented" role="radiogroup" aria-label="鉴权方案">
-            {([['auto', '自动'], ['bearer', 'Bearer'], ['x-api-key', 'x-api-key'], ['none', '无 Key']] as Array<[AuthMode, string]>).map(([value, label]) => (
-              <button key={value} className={authModeValue === value ? 'selected' : ''} onClick={() => setAuthModeValue(value)} type="button">{label}</button>
-            ))}
-          </div>
-
-          <label className="field-label" htmlFor="manual-models">手动模型 ID <span>可选</span></label>
-          <textarea id="manual-models" value={manualModels} onChange={(event) => setManualModels(event.target.value)} placeholder={'服务不提供 /models 时填写，例如：\ngpt-4o, claude-3-5-sonnet'} rows={3} />
-
-          <div className="scan-options">
-            <div className="option-row">
-              <div><strong>深度探测</strong><small>{deepScan ? '每个模型最多 7 个真实请求' : '每个模型 2 个低成本请求（含性能）'}</small></div>
-              <button type="button" className={`switch ${deepScan ? 'on' : ''}`} aria-label="切换深度探测" aria-pressed={deepScan} onClick={() => setDeepScan((current) => !current)}><span /></button>
-            </div>
-            <div className="option-row compact-row">
-              <div><strong>最多测试模型</strong><small>避免一次性消耗过多额度</small></div>
-              <select value={maxModels} onChange={(event) => setMaxModels(event.target.value)} aria-label="最多测试模型数量"><option value="6">06</option><option value="12">12</option><option value="24">24</option><option value="50">50</option></select>
-            </div>
-          </div>
-
-          <div className="action-stack">
-            {!running && <button className="secondary-button" type="button" onClick={getModelList}><span className="button-icon">≡</span> 仅获取模型列表</button>}
-            {running ? <button className="primary-button stop-button" type="button" onClick={stopHealthCheck}><span className="button-icon">■</span> 停止本次探测</button> : <button className="primary-button" type="button" onClick={runHealthCheck}><span className="button-icon">↗</span> 开始一键体检</button>}
-          </div>
-          <div className="privacy-note"><span>◌</span><p>Key 仅用于当前页面的 fetch 请求，刷新页面即清除。请确认目标 API 允许浏览器跨域访问。</p></div>
-
-          <div className="activity-block">
-            <div className="activity-title"><span>ACTIVITY</span><span>{phase}</span></div>
-            {running && <div className="progress-track"><span style={{ width: `${Math.min(progress, 98)}%` }} /></div>}
-            <div className="activity-list">
-              {activities.length ? activities.map((activity, index) => <div className="activity-item" key={`${activity.time}-${index}`}><span className={`activity-bullet ${activity.tone}`} /><time>{activity.time}</time><p>{activity.message}</p></div>) : <div className="empty-activity">开始后，这里会显示每个阶段的实时记录。</div>}
-            </div>
-          </div>
-        </aside>
-
+        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} deepScan={deepScan} maxModels={maxModels} running={running} phase={phase} progress={progress} activities={activities} onBaseUrlChange={setBaseUrl} onApiKeyChange={setApiKey} onAuthModeChange={setAuthModeValue} onManualModelsChange={setManualModels} onDeepScanChange={setDeepScan} onMaxModelsChange={setMaxModels} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
         <section className="results-column">
-          <div className="summary-grid">
-            <div className="summary-card"><span>MODELS</span><strong>{summary.total || '—'}</strong><small>目录中的模型</small></div>
-            <div className="summary-card mint"><span>REACHABLE</span><strong>{summary.reachable || '—'}</strong><small>文本调用通过</small></div>
-            <div className="summary-card violet"><span>VISION</span><strong>{summary.vision || '—'}</strong><small>多模态通过</small></div>
-            <div className="summary-card orange"><span>CODE READY</span><strong>{summary.code || '—'}</strong><small>Responses / Claude</small></div>
-          </div>
-
-          <div className="metrics-strip">
-            <div className="metric-cell"><span>AVG FIRST TOKEN</span><strong>{summary.avgFirstToken ? `${summary.avgFirstToken} ms` : '—'}</strong><small>平均首字延迟 · {summary.performanceSamples ? `${summary.performanceSamples} 个样本` : '等待流式探测'}</small></div>
-            <div className="metric-cell metric-speed"><span>AVG OUTPUT SPEED</span><strong>{summary.avgTokenSpeed ? `${summary.avgTokenSpeed} t/s` : summary.avgCharSpeed ? `${summary.avgCharSpeed} 字/s` : '—'}</strong><small>{summary.avgTokenSpeed ? '基于服务返回的 completion tokens' : '未返回 token usage 时显示字符速度'}</small></div>
-            <div className="metric-cell metric-latency"><span>AVG TOTAL LATENCY</span><strong>{summary.avgTotalLatency ? `${summary.avgTotalLatency} ms` : '—'}</strong><small>流式请求从发出到结束</small></div>
-          </div>
-
-          <div className="panel results-panel">
-            <div className="panel-heading results-heading">
-              <div><span className="section-index">B / INVENTORY & PROBES</span><h2>模型能力矩阵</h2></div>
-              <div className="results-meta"><span>{catalogOnly ? 'MODEL LIST ONLY' : deepScan ? 'DEEP SCAN' : 'QUICK SCAN'}</span><span className="meta-divider" /><span>{catalogOnly ? `${catalogTotal} MODELS` : `${summary.passed}/${summary.tested || 0} PASS`}</span></div>
-            </div>
-            {error && <div className="error-banner"><span>!</span><p>{error}</p></div>}
-            {!models.length ? <div className="empty-state"><div className="empty-orbit"><div className="orbit-dot dot-a" /><div className="orbit-dot dot-b" /><div className="orbit-dot dot-c" /><div className="orbit-core">API</div></div><h3>等待一次真实连接</h3><p>填入 Base URL 和 Key 后，体检台会先读取 `/models`，并从目录元数据中读取模型声明的 Context。</p><div className="empty-tags"><span>MODEL DISCOVERY</span><span>DECLARED CONTEXT</span><span>CAPABILITY MATRIX</span></div></div> : <div className="table-wrap"><table><thead><tr><th>MODEL / FAMILY</th>{PROBES.map((probe) => <th key={probe.key} title={probe.description}>{probe.short}</th>)}<th title="从 /models 元数据读取，不会发起额外请求">CONTEXT</th><th>STATUS</th></tr></thead><tbody>{models.map((model) => { const overall = overallForModel(model); return <tr key={model.id} className={selected?.id === model.id ? 'selected-row' : ''} onClick={() => setSelectedModel(model.id)}><td><div className="model-cell"><span className="model-orb">{model.family.slice(0, 1)}</span><div><strong>{model.id}</strong><small>{model.family}{model.ownedBy ? ` · ${model.ownedBy}` : ''}</small></div></div></td>{PROBES.map((probe) => { const result = model.probes[probe.key]; return <td key={probe.key}>{result ? <span className={`probe-pill ${result.status}`} title={result.detail}>{result.status === 'pass' ? '✓' : result.status === 'warn' ? '–' : result.status === 'fail' ? '×' : '…'}<i>{statusLabel(result.status)}</i></span> : <span className="probe-empty">·</span>}</td> })}<td><span className={model.declaredContext ? 'context-value' : 'probe-empty'} title={model.contextField ? `来源字段：${model.contextField}` : '模型目录未声明 Context'}>{formatContext(model.declaredContext)}</span></td><td><span className={`overall-badge ${overall}`}>{overall === 'pass' ? 'READY' : overall === 'warn' ? 'PARTIAL' : overall === 'fail' ? 'CHECK' : overall === 'running' ? 'RUNNING' : '—'}</span></td></tr>})}</tbody></table></div>}
-            {models.length > 0 && <div className="table-footer"><span>{summary.tested ? '点击模型行查看探测详情' : '点击模型行查看 Context 与目录信息'}</span><span>已显示 {models.length} / 发现 {catalogTotal || models.length} 个模型</span></div>}
-          </div>
-
-          {selected && <div className="panel detail-panel"><div className="detail-head"><div><span className="section-index">C / READOUT</span><h2>{selected.id}</h2></div><span className={`detail-status ${overallForModel(selected)}`}>{overallForModel(selected) === 'pass' ? 'COMPATIBILITY READY' : 'NEEDS REVIEW'}</span></div><div className="detail-grid"><div className={`detail-card ${selected.declaredContext ? 'pass' : 'idle'}`}><div className="detail-card-top"><span className="detail-key">CONTEXT</span><span className="detail-status-dot" /></div><strong>声明的 Context</strong><small>{selected.declaredContext ? `${formatContext(selected.declaredContext)} tokens · 来自模型目录元数据` : '模型目录未返回常见 Context 字段'}</small>{selected.contextField && <code>{selected.contextField}</code>}</div>{PROBES.map((probe) => { const result = selected.probes[probe.key]; return <div className={`detail-card ${result?.status ?? 'idle'}`} key={probe.key}><div className="detail-card-top"><span className="detail-key">{probe.short}</span><span className="detail-status-dot" /></div><strong>{probe.label}</strong><small>{result ? result.detail : catalogOnly ? '尚未发起能力测试' : '快速模式未执行此项'}</small>{result?.endpoint && <code>{result.endpoint.replace(cleanBaseUrl(baseUrl), '…')}</code>}</div> })}</div><div className="model-performance"><span className="readout-label">PERFORMANCE · STREAM</span><div className="model-performance-values"><div><small>首字延迟</small><strong>{selected.probes.stream?.firstTokenMs ? `${selected.probes.stream.firstTokenMs} ms` : '—'}</strong></div><div><small>输出速度</small><strong>{selected.probes.stream?.tokensPerSecond ? `${selected.probes.stream.tokensPerSecond} t/s` : selected.probes.stream?.charsPerSecond ? `${selected.probes.stream.charsPerSecond} 字/s` : '—'}</strong></div><div><small>完整响应</small><strong>{selected.probes.stream?.duration ? `${selected.probes.stream.duration} ms` : '—'}</strong></div></div></div><div className="compat-note"><span className="note-symbol">i</span><p><strong>如何解读：</strong>绿色表示该协议在当前模型上真实返回成功；黄色通常是接口明确拒绝了能力（如 400 / 404），不代表 Key 无效；红色更可能是鉴权、限流、网络或服务端错误。Context 是从 `/models` 的元数据读取的声明值，不代表当前请求一定能完整使用全部窗口；手动输入模型 ID 时通常无法读取该字段。</p></div></div>}
+          <SummaryOverview summary={summary} />
+          <ModelMatrix models={models} selectedId={selected?.id ?? null} deepScan={deepScan} catalogOnly={catalogOnly} catalogTotal={catalogTotal} maxModels={maxModels} summary={summary} error={error} onSelect={setSelectedModel} />
+          {selected && <ModelReadout selected={selected} baseUrl={baseUrl} catalogOnly={catalogOnly} />}
         </section>
       </section>
 

@@ -8,9 +8,11 @@
 
 - 读取 OpenAI-compatible / Anthropic-compatible API 的模型目录，并兼容常见的 `data`、`models`、`results`、`items` 返回格式
 - 支持只获取模型列表，不发起能力测试请求
+- 提供快速模式与深度模式，默认快速模式更省额度
 - 探测文本、多模态、工具调用、JSON、流式输出
 - 检查 OpenAI Responses API（Codex 兼容基础）和 Anthropic Messages API（Claude Code 兼容基础）
 - 记录平均首字延迟、输出速度和完整响应耗时
+- 支持系统默认、浅色、深色主题切换
 - API Key 只存在当前浏览器页面内存中，不写入项目文件
 
 ## 本地运行
