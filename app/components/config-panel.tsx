@@ -14,6 +14,7 @@ type ConfigPanelProps = {
   deepScan: boolean;
   maxModels: string;
   running: boolean;
+  fetchingModels: boolean;
   phase: string;
   progress: number;
   activities: Activity[];
@@ -41,6 +42,7 @@ export function ConfigPanel({
   deepScan,
   maxModels,
   running,
+  fetchingModels,
   phase,
   progress,
   activities,
@@ -119,8 +121,8 @@ export function ConfigPanel({
 
       <div className="manual-model-heading">
         <label className="field-label" htmlFor="manual-models">手动模型 ID <span>可选</span></label>
-        <button className="inline-action" type="button" onClick={onGetModelList} disabled={running}>
-          <span>≡</span> 获取列表
+        <button className="inline-action" type="button" onClick={onGetModelList} disabled={running || fetchingModels}>
+          <span>≡</span> {fetchingModels ? '获取中…' : '获取列表'}
         </button>
       </div>
       <textarea id="manual-models" value={manualModels} onChange={(event) => onManualModelsChange(event.target.value)} placeholder={'服务不提供模型列表时填写，例如：\ngpt-4o, claude-3-5-sonnet'} rows={3} />
@@ -130,6 +132,7 @@ export function ConfigPanel({
           <button
             className={`model-picker-trigger ${modelPickerOpen ? 'open' : ''}`}
             type="button"
+            disabled={running || fetchingModels}
             aria-expanded={modelPickerOpen}
             aria-haspopup="dialog"
             onClick={() => setModelPickerOpen((open) => !open)}
@@ -153,14 +156,14 @@ export function ConfigPanel({
                 aria-label="搜索模型"
               />
               <div className="model-picker-actions">
-                <button type="button" onClick={onSelectAllModels} disabled={allModelsSelected}>全选</button>
-                <button type="button" onClick={onClearModels} disabled={!selectedModelIds.length}>清空</button>
+                <button type="button" onClick={onSelectAllModels} disabled={running || fetchingModels || allModelsSelected}>全选</button>
+                <button type="button" onClick={onClearModels} disabled={running || fetchingModels || !selectedModelIds.length}>清空</button>
                 <span>{filteredModels.length} 个可见</span>
               </div>
               <div className="model-picker-list" role="listbox" aria-multiselectable="true" aria-label="模型列表">
                 {filteredModels.length ? filteredModels.map((model) => (
                   <label className="model-picker-option" key={model.id}>
-                    <input type="checkbox" checked={selectedSet.has(model.id)} onChange={() => onToggleModel(model.id)} />
+                    <input type="checkbox" checked={selectedSet.has(model.id)} onChange={() => onToggleModel(model.id)} disabled={running || fetchingModels} />
                     <span className="model-picker-check" aria-hidden="true">✓</span>
                     <span className="model-picker-option-text"><strong title={model.id}>{model.id}</strong><small>{model.family}{model.ownedBy ? ` · ${model.ownedBy}` : ''}</small></span>
                   </label>
@@ -184,7 +187,7 @@ export function ConfigPanel({
       </div>
 
       <div className="action-stack">
-        {running ? <button className="primary-button stop-button" type="button" onClick={onStopHealthCheck}><span className="button-icon">■</span> 停止本次探测</button> : <button className="primary-button" type="button" onClick={onRunHealthCheck}><span className="button-icon">↗</span> 开始一键体检</button>}
+        {running ? <button className="primary-button stop-button" type="button" onClick={onStopHealthCheck}><span className="button-icon">■</span> 停止本次探测</button> : <button className="primary-button" type="button" onClick={onRunHealthCheck} disabled={fetchingModels}><span className="button-icon">↗</span> {fetchingModels ? '获取模型列表中…' : '开始一键体检'}</button>}
       </div>
       <div className="privacy-note"><span>◌</span><p>Key 仅用于当前页面的 fetch 请求，刷新页面即清除。请确认目标 API 允许浏览器跨域访问。</p></div>
 

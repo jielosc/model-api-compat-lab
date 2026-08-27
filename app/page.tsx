@@ -484,6 +484,7 @@ export default function Home() {
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [running, setRunning] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
   const [phase, setPhase] = useState('等待接入');
   const [error, setError] = useState('');
   const [themeMode, setThemeMode] = useState<ThemeMode>('system');
@@ -618,30 +619,24 @@ export default function Home() {
   }
 
   async function getModelList() {
-    if (running) return;
+    if (running || fetchingModels) return;
     const trimmedBase = validateBaseUrl();
     if (!trimmedBase) return;
 
     const controller = new AbortController();
     abortRef.current = controller;
-    setRunning(true);
-    setError('');
-    setModels([]);
-    setCatalogModels([]);
-    setSelectedModelIds([]);
-    setCatalogTotal(0);
-    setCatalogOnly(true);
-    setSelectedModel(null);
-    setProgressScope(null);
+    setFetchingModels(true);
     setActivities([]);
     setPhase('读取模型目录');
     addActivity('开始读取模型列表');
 
     try {
       const found = await discoverModels(controller);
-      const { initialModels } = applyModelCatalog(found, false);
+      const allModels = found.discovered.map((item) => ({ id: item.id, ownedBy: item.ownedBy, declaredContext: item.declaredContext, contextField: item.contextField, family: familyForModel(item.id), probes: {} }));
+      setCatalogModels(allModels);
+      setSelectedModelIds(allModels.map((model) => model.id));
       addActivity(`获取到 ${found.discovered.length} 个模型 · ${found.endpoint}`, 'good');
-      if (initialModels.length) setPhase('模型列表已获取');
+      if (allModels.length) setPhase('模型列表已获取');
       addActivity('模型列表获取完成，尚未发起能力测试', 'good');
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === 'AbortError') {
@@ -649,18 +644,17 @@ export default function Home() {
         addActivity('用户中止了模型列表获取');
       } else {
         const message = caught instanceof Error ? caught.message : '未知错误';
-        setError(message);
         setPhase('获取中断');
         addActivity(message, 'bad');
       }
     } finally {
-      setRunning(false);
+      setFetchingModels(false);
       abortRef.current = null;
     }
   }
 
   async function runHealthCheck() {
-    if (running) return;
+    if (running || fetchingModels) return;
     if (catalogModels.length > 0 && selectedModelIds.length === 0) {
       setError('请至少选择一个模型后再开始一键体检。');
       return;
@@ -835,7 +829,7 @@ export default function Home() {
   const progress = progressTotal ? Math.min(100, Math.round((progressCompleted / progressTotal) * 100)) : 0;
 
   return (
-    <main className="app-shell" aria-busy={running}>
+    <main className="app-shell" aria-busy={running || fetchingModels}>
       <div className="ambient ambient-one" />
       <div className="ambient ambient-two" />
       <header className="topbar">
@@ -865,7 +859,7 @@ export default function Home() {
       </div>
 
       <section className="workspace">
-        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} modelOptions={catalogModels.length ? catalogModels : models} selectedModelIds={selectedModelIds} deepScan={deepScan} maxModels={maxModels} running={running} phase={phase} progress={progress} activities={activities} onBaseUrlChange={setBaseUrl} onApiKeyChange={setApiKey} onAuthModeChange={setAuthModeValue} onManualModelsChange={setManualModels} onToggleModel={toggleModel} onSelectAllModels={selectAllModels} onClearModels={clearModels} onDeepScanChange={setDeepScan} onMaxModelsChange={setMaxModels} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
+        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} modelOptions={catalogModels.length ? catalogModels : models} selectedModelIds={selectedModelIds} deepScan={deepScan} maxModels={maxModels} running={running} fetchingModels={fetchingModels} phase={phase} progress={progress} activities={activities} onBaseUrlChange={setBaseUrl} onApiKeyChange={setApiKey} onAuthModeChange={setAuthModeValue} onManualModelsChange={setManualModels} onToggleModel={toggleModel} onSelectAllModels={selectAllModels} onClearModels={clearModels} onDeepScanChange={setDeepScan} onMaxModelsChange={setMaxModels} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
         <section className="results-column">
           <SummaryOverview summary={summary} />
           <ModelMatrix models={models} selectedId={selected?.id ?? null} deepScan={deepScan} catalogOnly={catalogOnly} catalogTotal={catalogTotal} maxModels={maxModels} summary={summary} error={error} running={running} onSelect={setSelectedModel} onExportJson={exportJson} onCopyMarkdown={copyMarkdown} />
