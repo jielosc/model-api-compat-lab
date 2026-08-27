@@ -37,8 +37,26 @@ type ProgressScope = {
   keys: ProbeKey[];
 };
 
+declare global {
+  interface Window {
+    __MODEL_API_LOCAL_PROXY__?: boolean;
+  }
+}
+
 const REQUEST_TIMEOUT_MS = 20_000;
 const DIAGNOSTIC_TIMEOUT_MS = 5_000;
+
+function isLocalProxyMode() {
+  return typeof window !== 'undefined' && window.__MODEL_API_LOCAL_PROXY__ === true;
+}
+
+function apiFetch(url: string, init: RequestInit = {}) {
+  if (!isLocalProxyMode()) return fetch(url, init);
+  const headers = new Headers(init.headers);
+  headers.set('x-model-api-local', '1');
+  const proxyUrl = `/__model_api_proxy?url=${encodeURIComponent(url)}`;
+  return fetch(proxyUrl, { ...init, headers });
+}
 
 function nowLabel() {
   return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date());
@@ -115,6 +133,9 @@ async function networkFailureMessage(error: unknown, url: string, signal: AbortS
   if (message && !/failed to fetch|networkerror|load failed/i.test(message)) return message;
 
   const endpoint = safeEndpointLabel(url);
+  if (isLocalProxyMode()) {
+    return `本地助手无法完成对 ${endpoint} 的请求，请确认助手仍在运行，并检查目标地址、DNS 或 TLS。`;
+  }
   try {
     const target = new URL(url);
     if (window.location.protocol === 'https:' && target.protocol === 'http:') {
@@ -379,7 +400,7 @@ async function requestJson(
         let raw: string;
         let firstByteMs: number;
         try {
-          response = await fetch(url, { ...init, headers, signal: deadline.signal });
+          response = await apiFetch(url, { ...init, headers, signal: deadline.signal });
           firstByteMs = Math.round(performance.now() - requestStarted);
           raw = await response.text();
         } catch (error) {
@@ -508,7 +529,7 @@ async function probeModel(
         const requestStarted = performance.now();
         // Do not require stream_options here: many OpenAI-compatible gateways
         // support SSE but reject this optional usage-reporting parameter.
-        const response = await fetch(url, { ...baseJsonInit({ model, messages: [{ role: 'user', content: '请用一句简短的话介绍自己。' }], max_tokens: 24, stream: true }), headers, signal: deadline.signal });
+        const response = await apiFetch(url, { ...baseJsonInit({ model, messages: [{ role: 'user', content: '请用一句简短的话介绍自己。' }], max_tokens: 24, stream: true }), headers, signal: deadline.signal });
         if (response.ok) {
           const reader = response.body?.getReader();
           if (!reader) {
@@ -654,6 +675,7 @@ export default function Home() {
   const [phase, setPhase] = useState('等待接入');
   const [error, setError] = useState('');
   const [themeMode, setThemeMode] = useState<ThemeMode>('system');
+  const [localProxyMode, setLocalProxyMode] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [progressScope, setProgressScope] = useState<ProgressScope | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -669,6 +691,7 @@ export default function Home() {
       if (typeof saved.manualModels === 'string') setManualModels(saved.manualModels);
       if (typeof saved.deepScan === 'boolean') setDeepScan(saved.deepScan);
       if (saved.themeMode === 'system' || saved.themeMode === 'light' || saved.themeMode === 'dark') setThemeMode(saved.themeMode);
+      setLocalProxyMode(isLocalProxyMode());
       setHydrated(true);
     });
     return () => {
@@ -1083,7 +1106,7 @@ export default function Home() {
             <div className="brand-name">模型 API 体检台</div>
           </div>
         </div>
-        <div className="topbar-tools"><ThemeToggle value={themeMode} onChange={setThemeMode} /><div className="topbar-note"><span className="live-dot" /> 浏览器直连 · 密钥不落盘</div></div>
+        <div className="topbar-tools"><ThemeToggle value={themeMode} onChange={setThemeMode} /><div className="topbar-note"><span className="live-dot" /> {localProxyMode ? '本地助手 · 同源转发' : '浏览器直连 · 密钥不落盘'}</div></div>
       </header>
 
       <section className="hero">
@@ -1102,7 +1125,7 @@ export default function Home() {
       </div>
 
       <section className="workspace">
-        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} modelOptions={catalogModels} selectedModelIds={selectedModelIds} deepScan={deepScan} running={running} fetchingModels={fetchingModels} ready={hydrated} phase={phase} progress={progress} activities={activities} onBaseUrlChange={handleBaseUrlChange} onApiKeyChange={handleApiKeyChange} onAuthModeChange={handleAuthModeChange} onManualModelsChange={handleManualModelsChange} onToggleModel={toggleModel} onSelectAllModels={selectAllModels} onClearModels={clearModels} onDeepScanChange={setDeepScan} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
+        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} modelOptions={catalogModels} selectedModelIds={selectedModelIds} deepScan={deepScan} running={running} fetchingModels={fetchingModels} ready={hydrated} localProxyMode={localProxyMode} phase={phase} progress={progress} activities={activities} onBaseUrlChange={handleBaseUrlChange} onApiKeyChange={handleApiKeyChange} onAuthModeChange={handleAuthModeChange} onManualModelsChange={handleManualModelsChange} onToggleModel={toggleModel} onSelectAllModels={selectAllModels} onClearModels={clearModels} onDeepScanChange={setDeepScan} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
         <section className="results-column">
           <SummaryOverview summary={summary} />
           <ModelMatrix models={models} selectedId={selected?.id ?? null} deepScan={deepScan} catalogOnly={catalogOnly} catalogTotal={catalogTotal} summary={summary} error={error} running={running} onSelect={setSelectedModel} onExportJson={exportJson} onCopyMarkdown={copyMarkdown} />

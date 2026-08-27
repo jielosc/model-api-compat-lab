@@ -15,6 +15,7 @@ type ConfigPanelProps = {
   running: boolean;
   fetchingModels: boolean;
   ready: boolean;
+  localProxyMode: boolean;
   phase: string;
   progress: number;
   activities: Activity[];
@@ -42,6 +43,7 @@ export function ConfigPanel({
   running,
   fetchingModels,
   ready,
+  localProxyMode,
   phase,
   progress,
   activities,
@@ -101,7 +103,7 @@ export function ConfigPanel({
     <aside className="config-panel panel">
       <div className="panel-heading">
         <div><span className="section-index">A / CONNECT</span><h2>接入配置</h2></div>
-        <span className="lock-label">LOCAL ONLY</span>
+        <span className="lock-label">{localProxyMode ? 'LOCAL PROXY' : 'LOCAL ONLY'}</span>
       </div>
 
       <label className="field-label" htmlFor="base-url">API Base URL</label>
@@ -184,7 +186,7 @@ export function ConfigPanel({
       <div className="action-stack">
         {running ? <button className="primary-button stop-button" type="button" onClick={onStopHealthCheck}><span className="button-icon">■</span> 停止本次探测</button> : <button className="primary-button" type="button" onClick={onRunHealthCheck} disabled={!ready || fetchingModels}><span className="button-icon">↗</span> {fetchingModels ? '获取模型列表中…' : '开始一键体检'}</button>}
       </div>
-      <div className="privacy-note"><span>◌</span><p>Key 仅用于当前页面的 fetch 请求，刷新页面即清除。请确认目标 API 允许浏览器跨域访问。</p></div>
+      <div className="privacy-note"><span>◌</span><p>{localProxyMode ? '本地助手已启用：Key 仅在当前浏览器与本机进程之间传递，不经过本站或公共代理。' : 'Key 仅用于当前页面的 fetch 请求，刷新页面即清除。请确认目标 API 允许浏览器跨域访问。'}</p></div>
 
       <div className="activity-block">
         <div className="activity-title">
