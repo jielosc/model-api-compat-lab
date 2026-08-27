@@ -25,6 +25,8 @@ type ModelResult = {
   id: string;
   ownedBy?: string;
   family: string;
+  declaredContext?: number;
+  contextField?: string;
   probes: Partial<Record<ProbeKey, ProbeResult>>;
 };
 
@@ -101,6 +103,48 @@ function manualModelIds(value: string) {
     .split(/[\n,，]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+const CONTEXT_FIELDS = [
+  'context_length',
+  'context_window',
+  'context_window_size',
+  'max_context_length',
+  'max_model_len',
+  'max_input_tokens',
+  'input_token_limit',
+  'token_limit',
+] as const;
+
+function numericContext(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.round(value);
+  if (typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim())) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : undefined;
+  }
+  return undefined;
+}
+
+function readDeclaredContext(item: Record<string, unknown>) {
+  const sources: Array<{ record: Record<string, unknown>; prefix: string }> = [{ record: item, prefix: '' }];
+  for (const key of ['metadata', 'model_info', 'details', 'limits', 'capabilities', 'parameters']) {
+    const nested = item[key];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) sources.push({ record: nested as Record<string, unknown>, prefix: `${key}.` });
+  }
+  for (const source of sources) {
+    for (const field of CONTEXT_FIELDS) {
+      const value = numericContext(source.record[field]);
+      if (value) return { value, field: `${source.prefix}${field}` };
+    }
+  }
+  return {};
+}
+
+function formatContext(value?: number) {
+  if (!value) return '—';
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`;
+  if (value >= 1_000) return `${Number((value / 1_000).toFixed(1))}K`;
+  return String(value);
 }
 
 async function requestJson(
@@ -382,12 +426,15 @@ export default function Home() {
       const rawList = Array.isArray(first.body?.data) ? first.body.data : Array.isArray(first.body) ? first.body : [];
       const discovered = rawList
         .map((item) => typeof item === 'string' ? { id: item } : item && typeof item === 'object' ? item as Record<string, unknown> : {})
-        .map((item) => ({ id: String(item.id ?? ''), ownedBy: item.owned_by ? String(item.owned_by) : undefined }))
+        .map((item) => {
+          const context = readDeclaredContext(item);
+          return { id: String(item.id ?? ''), ownedBy: item.owned_by ? String(item.owned_by) : undefined, declaredContext: context.value, contextField: context.field };
+        })
         .filter((item) => item.id);
       if (discovered.length) return { discovered, endpoint: first.url };
     }
 
-    const ids = manualModelIds(manualModels).map((id) => ({ id, ownedBy: undefined as string | undefined }));
+    const ids = manualModelIds(manualModels).map((id) => ({ id, ownedBy: undefined as string | undefined, declaredContext: undefined as number | undefined, contextField: undefined as string | undefined }));
     if (ids.length) return { discovered: ids, endpoint: '手动输入' };
     throw new Error(first.ok ? '接口返回成功，但没有找到 data[].id；可在“手动模型 ID”中填写模型。' : first.detail ?? '无法访问模型列表');
   }
@@ -419,7 +466,7 @@ export default function Home() {
     try {
       const found = await discoverModels(controller);
       const limited = found.discovered.slice(0, Math.max(1, Number(maxModels) || 12));
-      const initialModels = limited.map((item) => ({ id: item.id, ownedBy: item.ownedBy, family: familyForModel(item.id), probes: {} }));
+      const initialModels = limited.map((item) => ({ id: item.id, ownedBy: item.ownedBy, declaredContext: item.declaredContext, contextField: item.contextField, family: familyForModel(item.id), probes: {} }));
       setModels(initialModels);
       setSelectedModel(initialModels[0]?.id ?? null);
       addActivity(`发现 ${found.discovered.length} 个模型 · ${found.endpoint}`, 'good');
@@ -562,11 +609,11 @@ export default function Home() {
               <div className="results-meta"><span>{deepScan ? 'DEEP SCAN' : 'QUICK SCAN'}</span><span className="meta-divider" /><span>{summary.passed}/{summary.tested || 0} PASS</span></div>
             </div>
             {error && <div className="error-banner"><span>!</span><p>{error}</p></div>}
-            {!models.length ? <div className="empty-state"><div className="empty-orbit"><div className="orbit-dot dot-a" /><div className="orbit-dot dot-b" /><div className="orbit-dot dot-c" /><div className="orbit-core">API</div></div><h3>等待一次真实连接</h3><p>填入 Base URL 和 Key 后，体检台会先读取 `/models`，再按模型逐项发起最小探测请求。</p><div className="empty-tags"><span>MODEL DISCOVERY</span><span>CAPABILITY MATRIX</span><span>CLI COMPATIBILITY</span></div></div> : <div className="table-wrap"><table><thead><tr><th>MODEL / FAMILY</th>{PROBES.map((probe) => <th key={probe.key} title={probe.description}>{probe.short}</th>)}<th>STATUS</th></tr></thead><tbody>{models.map((model) => { const overall = overallForModel(model); return <tr key={model.id} className={selected?.id === model.id ? 'selected-row' : ''} onClick={() => setSelectedModel(model.id)}><td><div className="model-cell"><span className="model-orb">{model.family.slice(0, 1)}</span><div><strong>{model.id}</strong><small>{model.family}{model.ownedBy ? ` · ${model.ownedBy}` : ''}</small></div></div></td>{PROBES.map((probe) => { const result = model.probes[probe.key]; return <td key={probe.key}>{result ? <span className={`probe-pill ${result.status}`} title={result.detail}>{result.status === 'pass' ? '✓' : result.status === 'warn' ? '–' : result.status === 'fail' ? '×' : '…'}<i>{statusLabel(result.status)}</i></span> : <span className="probe-empty">·</span>}</td> })}<td><span className={`overall-badge ${overall}`}>{overall === 'pass' ? 'READY' : overall === 'warn' ? 'PARTIAL' : overall === 'fail' ? 'CHECK' : overall === 'running' ? 'RUNNING' : '—'}</span></td></tr>})}</tbody></table></div>}
+            {!models.length ? <div className="empty-state"><div className="empty-orbit"><div className="orbit-dot dot-a" /><div className="orbit-dot dot-b" /><div className="orbit-dot dot-c" /><div className="orbit-core">API</div></div><h3>等待一次真实连接</h3><p>填入 Base URL 和 Key 后，体检台会先读取 `/models`，并从目录元数据中读取模型声明的 Context。</p><div className="empty-tags"><span>MODEL DISCOVERY</span><span>DECLARED CONTEXT</span><span>CAPABILITY MATRIX</span></div></div> : <div className="table-wrap"><table><thead><tr><th>MODEL / FAMILY</th>{PROBES.map((probe) => <th key={probe.key} title={probe.description}>{probe.short}</th>)}<th title="从 /models 元数据读取，不会发起额外请求">CONTEXT</th><th>STATUS</th></tr></thead><tbody>{models.map((model) => { const overall = overallForModel(model); return <tr key={model.id} className={selected?.id === model.id ? 'selected-row' : ''} onClick={() => setSelectedModel(model.id)}><td><div className="model-cell"><span className="model-orb">{model.family.slice(0, 1)}</span><div><strong>{model.id}</strong><small>{model.family}{model.ownedBy ? ` · ${model.ownedBy}` : ''}</small></div></div></td>{PROBES.map((probe) => { const result = model.probes[probe.key]; return <td key={probe.key}>{result ? <span className={`probe-pill ${result.status}`} title={result.detail}>{result.status === 'pass' ? '✓' : result.status === 'warn' ? '–' : result.status === 'fail' ? '×' : '…'}<i>{statusLabel(result.status)}</i></span> : <span className="probe-empty">·</span>}</td> })}<td><span className={model.declaredContext ? 'context-value' : 'probe-empty'} title={model.contextField ? `来源字段：${model.contextField}` : '模型目录未声明 Context'}>{formatContext(model.declaredContext)}</span></td><td><span className={`overall-badge ${overall}`}>{overall === 'pass' ? 'READY' : overall === 'warn' ? 'PARTIAL' : overall === 'fail' ? 'CHECK' : overall === 'running' ? 'RUNNING' : '—'}</span></td></tr>})}</tbody></table></div>}
             {models.length > 0 && <div className="table-footer"><span>点击模型行查看探测详情</span><span>已测试 {models.length} / 发现模型上限 {maxModels}</span></div>}
           </div>
 
-          {selected && <div className="panel detail-panel"><div className="detail-head"><div><span className="section-index">C / READOUT</span><h2>{selected.id}</h2></div><span className={`detail-status ${overallForModel(selected)}`}>{overallForModel(selected) === 'pass' ? 'COMPATIBILITY READY' : 'NEEDS REVIEW'}</span></div><div className="detail-grid">{PROBES.map((probe) => { const result = selected.probes[probe.key]; return <div className={`detail-card ${result?.status ?? 'idle'}`} key={probe.key}><div className="detail-card-top"><span className="detail-key">{probe.short}</span><span className="detail-status-dot" /></div><strong>{probe.label}</strong><small>{result ? result.detail : '快速模式未执行此项'}</small>{result?.endpoint && <code>{result.endpoint.replace(cleanBaseUrl(baseUrl), '…')}</code>}</div> })}</div><div className="model-performance"><span className="readout-label">PERFORMANCE · STREAM</span><div className="model-performance-values"><div><small>首字延迟</small><strong>{selected.probes.stream?.firstTokenMs ? `${selected.probes.stream.firstTokenMs} ms` : '—'}</strong></div><div><small>输出速度</small><strong>{selected.probes.stream?.tokensPerSecond ? `${selected.probes.stream.tokensPerSecond} t/s` : selected.probes.stream?.charsPerSecond ? `${selected.probes.stream.charsPerSecond} 字/s` : '—'}</strong></div><div><small>完整响应</small><strong>{selected.probes.stream?.duration ? `${selected.probes.stream.duration} ms` : '—'}</strong></div></div></div><div className="compat-note"><span className="note-symbol">i</span><p><strong>如何解读：</strong>绿色表示该协议在当前模型上真实返回成功；黄色通常是接口明确拒绝了能力（如 400 / 404），不代表 Key 无效；红色更可能是鉴权、限流、网络或服务端错误。Codex / Claude Code 卡片验证的是底层 API 协议，不等同于对 CLI 全部运行环境的完整验收。</p></div></div>}
+          {selected && <div className="panel detail-panel"><div className="detail-head"><div><span className="section-index">C / READOUT</span><h2>{selected.id}</h2></div><span className={`detail-status ${overallForModel(selected)}`}>{overallForModel(selected) === 'pass' ? 'COMPATIBILITY READY' : 'NEEDS REVIEW'}</span></div><div className="detail-grid"><div className={`detail-card ${selected.declaredContext ? 'pass' : 'idle'}`}><div className="detail-card-top"><span className="detail-key">CONTEXT</span><span className="detail-status-dot" /></div><strong>声明的 Context</strong><small>{selected.declaredContext ? `${formatContext(selected.declaredContext)} tokens · 来自模型目录元数据` : '模型目录未返回常见 Context 字段'}</small>{selected.contextField && <code>{selected.contextField}</code>}</div>{PROBES.map((probe) => { const result = selected.probes[probe.key]; return <div className={`detail-card ${result?.status ?? 'idle'}`} key={probe.key}><div className="detail-card-top"><span className="detail-key">{probe.short}</span><span className="detail-status-dot" /></div><strong>{probe.label}</strong><small>{result ? result.detail : '快速模式未执行此项'}</small>{result?.endpoint && <code>{result.endpoint.replace(cleanBaseUrl(baseUrl), '…')}</code>}</div> })}</div><div className="model-performance"><span className="readout-label">PERFORMANCE · STREAM</span><div className="model-performance-values"><div><small>首字延迟</small><strong>{selected.probes.stream?.firstTokenMs ? `${selected.probes.stream.firstTokenMs} ms` : '—'}</strong></div><div><small>输出速度</small><strong>{selected.probes.stream?.tokensPerSecond ? `${selected.probes.stream.tokensPerSecond} t/s` : selected.probes.stream?.charsPerSecond ? `${selected.probes.stream.charsPerSecond} 字/s` : '—'}</strong></div><div><small>完整响应</small><strong>{selected.probes.stream?.duration ? `${selected.probes.stream.duration} ms` : '—'}</strong></div></div></div><div className="compat-note"><span className="note-symbol">i</span><p><strong>如何解读：</strong>绿色表示该协议在当前模型上真实返回成功；黄色通常是接口明确拒绝了能力（如 400 / 404），不代表 Key 无效；红色更可能是鉴权、限流、网络或服务端错误。Context 是从 `/models` 的元数据读取的声明值，不代表当前请求一定能完整使用全部窗口；手动输入模型 ID 时通常无法读取该字段。</p></div></div>}
         </section>
       </section>
 

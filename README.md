@@ -1,6 +1,6 @@
 # 模型 API 体检台
 
-一个在浏览器中运行的模型 API 能力与兼容性探测工具。
+一个在浏览器中运行的模型 API 能力与兼容性探测工具。除真实能力探测外，还会从 `/models` 返回的元数据中读取模型声明的 Context（不发起额外请求）。
 
 **在线预览：** <https://model-api-compat-lab.pages.dev/> · **源码：** <https://github.com/jielosc/model-api-compat-lab>
 
