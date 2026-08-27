@@ -30,6 +30,14 @@ npm run dev
 
 这是一个纯前端静态站点，探测请求从浏览器直接发往用户填写的 API。目标 API 需要允许来自站点域名的 CORS 请求。Codex / Claude Code 检查验证的是底层 API 协议，不等同于对 CLI 全部运行环境的完整验收。
 
+如果页面确认目标地址可达但 CORS 预检未放行，API 服务端至少需要：
+
+- 允许来源 `https://model-api-compat-lab.pages.dev`
+- 允许 `GET`、`POST` 和 `OPTIONS`
+- 允许 `Authorization`、`Content-Type`、`x-api-key` 和 `anthropic-version` 请求头
+
+`Authorization` 建议显式列入 `Access-Control-Allow-Headers`，不要只依赖通配符。从 HTTPS 站点请求 HTTP API 还会被浏览器作为 Mixed Content 拦截。
+
 ## 构建
 
 ```bash

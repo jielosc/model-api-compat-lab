@@ -58,12 +58,43 @@ function sleep(ms: number, signal: AbortSignal) {
   });
 }
 
-function networkFailureMessage(error: unknown) {
-  const message = error instanceof Error ? error.message : '';
-  if (!message || /failed to fetch|networkerror|load failed/i.test(message)) {
-    return '网络请求失败，可能是 CORS 未放行或地址不可达。请确认目标 API 允许来自本站的跨域请求。';
+function safeEndpointLabel(value: string) {
+  try {
+    const url = new URL(value);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return value;
   }
-  return message;
+}
+
+async function networkFailureMessage(error: unknown, url: string, signal: AbortSignal) {
+  const message = error instanceof Error ? error.message : '';
+  if (message && !/failed to fetch|networkerror|load failed/i.test(message)) return message;
+
+  const endpoint = safeEndpointLabel(url);
+  try {
+    const target = new URL(url);
+    if (window.location.protocol === 'https:' && target.protocol === 'http:') {
+      return `Mixed Content 已拦截 ${endpoint}：HTTPS 网页不能直接请求 HTTP API，请改用 HTTPS 接口。`;
+    }
+  } catch {
+    // Base URL validation reports malformed URLs before requests are started.
+  }
+
+  try {
+    // A credential-free opaque request cannot expose response data, but it can
+    // distinguish a reachable endpoint from a browser-readable CORS response.
+    await fetch(url, { method: 'GET', mode: 'no-cors', credentials: 'omit', cache: 'no-store', signal });
+    return `${endpoint} 可达，但浏览器无法读取响应：基本可确定为 CORS / OPTIONS 预检未放行。服务端需允许 Origin ${window.location.origin}，并放行 Authorization、Content-Type、x-api-key、anthropic-version 请求头。`;
+  } catch (diagnosticError) {
+    if (isAbortError(diagnosticError)) throw diagnosticError;
+  }
+
+  return `无法连接 ${endpoint}。可能是地址 / DNS / TLS 不可达、私有网络限制，或 CORS 在响应阶段拦截。`;
 }
 
 function isAbortError(error: unknown) {
@@ -261,7 +292,7 @@ async function requestJson(
         break;
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') throw error;
-        lastFailure = networkFailureMessage(error);
+        lastFailure = await networkFailureMessage(error, url, signal);
         break;
       }
     }
@@ -438,7 +469,7 @@ async function probeModel(
         if (response.status !== 404 && response.status !== 405) break;
       } catch (error) {
         if (isAbortError(error)) throw error;
-        lastDetail = networkFailureMessage(error);
+        lastDetail = await networkFailureMessage(error, url, signal);
       }
     }
     return failedProbe(lastDetail, Math.round(performance.now() - started));
@@ -585,7 +616,8 @@ export default function Home() {
 
     const ids = manualModelIds(manualModels).map((id) => ({ id, ownedBy: undefined as string | undefined, declaredContext: undefined as number | undefined, contextField: undefined as string | undefined }));
     if (ids.length) return { discovered: ids, endpoint: '手动输入' };
-    throw new Error(`${lastFailure}。已尝试 /models、/v1/models 及常见兼容路径；也可在“手动模型 ID”中填写模型。`);
+    const failure = lastFailure.replace(/[。！？.!?]+$/u, '');
+    throw new Error(`${failure}。已尝试 /models、/v1/models 及常见兼容路径；也可在“手动模型 ID”中填写模型。`);
   }
 
   function validateBaseUrl() {
