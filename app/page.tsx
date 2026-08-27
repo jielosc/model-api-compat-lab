@@ -30,6 +30,13 @@ type ModelResult = {
   probes: Partial<Record<ProbeKey, ProbeResult>>;
 };
 
+type DiscoveredModel = {
+  id: string;
+  ownedBy?: string;
+  declaredContext?: number;
+  contextField?: string;
+};
+
 type Activity = {
   time: string;
   message: string;
@@ -377,6 +384,8 @@ export default function Home() {
   const [deepScan, setDeepScan] = useState(false);
   const [maxModels, setMaxModels] = useState('12');
   const [models, setModels] = useState<ModelResult[]>([]);
+  const [catalogTotal, setCatalogTotal] = useState(0);
+  const [catalogOnly, setCatalogOnly] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [activities, setActivities] = useState<Activity[]>([]);
   const [running, setRunning] = useState(false);
@@ -416,7 +425,7 @@ export default function Home() {
     setModels((current) => current.map((model) => model.id === id ? { ...model, probes: { ...model.probes, [key]: probe } } : model));
   }
 
-  async function discoverModels(controller: AbortController) {
+  async function discoverModels(controller: AbortController): Promise<{ discovered: DiscoveredModel[]; endpoint: string }> {
     const urls = endpointCandidates(baseUrl, '/models');
     let first = await requestJson(urls, { method: 'GET' }, authModeValue, apiKey, 'openai', controller.signal);
     if (!first.ok && authModeValue === 'auto') {
@@ -439,25 +448,81 @@ export default function Home() {
     throw new Error(first.ok ? '接口返回成功，但没有找到 data[].id；可在“手动模型 ID”中填写模型。' : first.detail ?? '无法访问模型列表');
   }
 
-  async function runHealthCheck() {
-    if (running) return;
+  function validateBaseUrl() {
     const trimmedBase = cleanBaseUrl(baseUrl);
     if (!trimmedBase) {
       setError('请先填写 API Base URL。');
-      return;
+      return undefined;
     }
     try {
       new URL(trimmedBase);
     } catch {
       setError('API Base URL 不是有效的网址。');
-      return;
+      return undefined;
     }
+    return trimmedBase;
+  }
+
+  function applyModelCatalog(found: { discovered: DiscoveredModel[]; endpoint: string }, limitToMaxModels: boolean) {
+    const limited = limitToMaxModels ? found.discovered.slice(0, Math.max(1, Number(maxModels) || 12)) : found.discovered;
+    const initialModels = limited.map((item) => ({ id: item.id, ownedBy: item.ownedBy, declaredContext: item.declaredContext, contextField: item.contextField, family: familyForModel(item.id), probes: {} }));
+    setCatalogTotal(found.discovered.length);
+    setModels(initialModels);
+    setSelectedModel(initialModels[0]?.id ?? null);
+    return { initialModels, limited };
+  }
+
+  async function getModelList() {
+    if (running) return;
+    const trimmedBase = validateBaseUrl();
+    if (!trimmedBase) return;
 
     const controller = new AbortController();
     abortRef.current = controller;
     setRunning(true);
     setError('');
     setModels([]);
+    setCatalogTotal(0);
+    setCatalogOnly(true);
+    setSelectedModel(null);
+    setActivities([]);
+    setPhase('读取模型目录');
+    addActivity('开始读取模型列表');
+
+    try {
+      const found = await discoverModels(controller);
+      const { initialModels } = applyModelCatalog(found, false);
+      addActivity(`获取到 ${found.discovered.length} 个模型 · ${found.endpoint}`, 'good');
+      if (initialModels.length) setPhase('模型列表已获取');
+      addActivity('模型列表获取完成，尚未发起能力测试', 'good');
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === 'AbortError') {
+        setPhase('已停止');
+        addActivity('用户中止了模型列表获取');
+      } else {
+        const message = caught instanceof Error ? caught.message : '未知错误';
+        setError(message);
+        setPhase('获取中断');
+        addActivity(message, 'bad');
+      }
+    } finally {
+      setRunning(false);
+      abortRef.current = null;
+    }
+  }
+
+  async function runHealthCheck() {
+    if (running) return;
+    const trimmedBase = validateBaseUrl();
+    if (!trimmedBase) return;
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setRunning(true);
+    setError('');
+    setModels([]);
+    setCatalogTotal(0);
+    setCatalogOnly(false);
     setSelectedModel(null);
     setActivities([]);
     setPhase('读取模型目录');
@@ -465,10 +530,7 @@ export default function Home() {
 
     try {
       const found = await discoverModels(controller);
-      const limited = found.discovered.slice(0, Math.max(1, Number(maxModels) || 12));
-      const initialModels = limited.map((item) => ({ id: item.id, ownedBy: item.ownedBy, declaredContext: item.declaredContext, contextField: item.contextField, family: familyForModel(item.id), probes: {} }));
-      setModels(initialModels);
-      setSelectedModel(initialModels[0]?.id ?? null);
+      const { initialModels, limited } = applyModelCatalog(found, true);
       addActivity(`发现 ${found.discovered.length} 个模型 · ${found.endpoint}`, 'good');
       if (found.discovered.length > limited.length) addActivity(`为控制请求量，本次先测试前 ${limited.length} 个模型`);
 
@@ -577,7 +639,10 @@ export default function Home() {
             </div>
           </div>
 
-          {running ? <button className="primary-button stop-button" type="button" onClick={stopHealthCheck}><span className="button-icon">■</span> 停止本次探测</button> : <button className="primary-button" type="button" onClick={runHealthCheck}><span className="button-icon">↗</span> 开始一键体检</button>}
+          <div className="action-stack">
+            {!running && <button className="secondary-button" type="button" onClick={getModelList}><span className="button-icon">≡</span> 仅获取模型列表</button>}
+            {running ? <button className="primary-button stop-button" type="button" onClick={stopHealthCheck}><span className="button-icon">■</span> 停止本次探测</button> : <button className="primary-button" type="button" onClick={runHealthCheck}><span className="button-icon">↗</span> 开始一键体检</button>}
+          </div>
           <div className="privacy-note"><span>◌</span><p>Key 仅用于当前页面的 fetch 请求，刷新页面即清除。请确认目标 API 允许浏览器跨域访问。</p></div>
 
           <div className="activity-block">
@@ -606,14 +671,14 @@ export default function Home() {
           <div className="panel results-panel">
             <div className="panel-heading results-heading">
               <div><span className="section-index">B / INVENTORY & PROBES</span><h2>模型能力矩阵</h2></div>
-              <div className="results-meta"><span>{deepScan ? 'DEEP SCAN' : 'QUICK SCAN'}</span><span className="meta-divider" /><span>{summary.passed}/{summary.tested || 0} PASS</span></div>
+              <div className="results-meta"><span>{catalogOnly ? 'MODEL LIST ONLY' : deepScan ? 'DEEP SCAN' : 'QUICK SCAN'}</span><span className="meta-divider" /><span>{catalogOnly ? `${catalogTotal} MODELS` : `${summary.passed}/${summary.tested || 0} PASS`}</span></div>
             </div>
             {error && <div className="error-banner"><span>!</span><p>{error}</p></div>}
             {!models.length ? <div className="empty-state"><div className="empty-orbit"><div className="orbit-dot dot-a" /><div className="orbit-dot dot-b" /><div className="orbit-dot dot-c" /><div className="orbit-core">API</div></div><h3>等待一次真实连接</h3><p>填入 Base URL 和 Key 后，体检台会先读取 `/models`，并从目录元数据中读取模型声明的 Context。</p><div className="empty-tags"><span>MODEL DISCOVERY</span><span>DECLARED CONTEXT</span><span>CAPABILITY MATRIX</span></div></div> : <div className="table-wrap"><table><thead><tr><th>MODEL / FAMILY</th>{PROBES.map((probe) => <th key={probe.key} title={probe.description}>{probe.short}</th>)}<th title="从 /models 元数据读取，不会发起额外请求">CONTEXT</th><th>STATUS</th></tr></thead><tbody>{models.map((model) => { const overall = overallForModel(model); return <tr key={model.id} className={selected?.id === model.id ? 'selected-row' : ''} onClick={() => setSelectedModel(model.id)}><td><div className="model-cell"><span className="model-orb">{model.family.slice(0, 1)}</span><div><strong>{model.id}</strong><small>{model.family}{model.ownedBy ? ` · ${model.ownedBy}` : ''}</small></div></div></td>{PROBES.map((probe) => { const result = model.probes[probe.key]; return <td key={probe.key}>{result ? <span className={`probe-pill ${result.status}`} title={result.detail}>{result.status === 'pass' ? '✓' : result.status === 'warn' ? '–' : result.status === 'fail' ? '×' : '…'}<i>{statusLabel(result.status)}</i></span> : <span className="probe-empty">·</span>}</td> })}<td><span className={model.declaredContext ? 'context-value' : 'probe-empty'} title={model.contextField ? `来源字段：${model.contextField}` : '模型目录未声明 Context'}>{formatContext(model.declaredContext)}</span></td><td><span className={`overall-badge ${overall}`}>{overall === 'pass' ? 'READY' : overall === 'warn' ? 'PARTIAL' : overall === 'fail' ? 'CHECK' : overall === 'running' ? 'RUNNING' : '—'}</span></td></tr>})}</tbody></table></div>}
-            {models.length > 0 && <div className="table-footer"><span>点击模型行查看探测详情</span><span>已测试 {models.length} / 发现模型上限 {maxModels}</span></div>}
+            {models.length > 0 && <div className="table-footer"><span>{summary.tested ? '点击模型行查看探测详情' : '点击模型行查看 Context 与目录信息'}</span><span>已显示 {models.length} / 发现 {catalogTotal || models.length} 个模型</span></div>}
           </div>
 
-          {selected && <div className="panel detail-panel"><div className="detail-head"><div><span className="section-index">C / READOUT</span><h2>{selected.id}</h2></div><span className={`detail-status ${overallForModel(selected)}`}>{overallForModel(selected) === 'pass' ? 'COMPATIBILITY READY' : 'NEEDS REVIEW'}</span></div><div className="detail-grid"><div className={`detail-card ${selected.declaredContext ? 'pass' : 'idle'}`}><div className="detail-card-top"><span className="detail-key">CONTEXT</span><span className="detail-status-dot" /></div><strong>声明的 Context</strong><small>{selected.declaredContext ? `${formatContext(selected.declaredContext)} tokens · 来自模型目录元数据` : '模型目录未返回常见 Context 字段'}</small>{selected.contextField && <code>{selected.contextField}</code>}</div>{PROBES.map((probe) => { const result = selected.probes[probe.key]; return <div className={`detail-card ${result?.status ?? 'idle'}`} key={probe.key}><div className="detail-card-top"><span className="detail-key">{probe.short}</span><span className="detail-status-dot" /></div><strong>{probe.label}</strong><small>{result ? result.detail : '快速模式未执行此项'}</small>{result?.endpoint && <code>{result.endpoint.replace(cleanBaseUrl(baseUrl), '…')}</code>}</div> })}</div><div className="model-performance"><span className="readout-label">PERFORMANCE · STREAM</span><div className="model-performance-values"><div><small>首字延迟</small><strong>{selected.probes.stream?.firstTokenMs ? `${selected.probes.stream.firstTokenMs} ms` : '—'}</strong></div><div><small>输出速度</small><strong>{selected.probes.stream?.tokensPerSecond ? `${selected.probes.stream.tokensPerSecond} t/s` : selected.probes.stream?.charsPerSecond ? `${selected.probes.stream.charsPerSecond} 字/s` : '—'}</strong></div><div><small>完整响应</small><strong>{selected.probes.stream?.duration ? `${selected.probes.stream.duration} ms` : '—'}</strong></div></div></div><div className="compat-note"><span className="note-symbol">i</span><p><strong>如何解读：</strong>绿色表示该协议在当前模型上真实返回成功；黄色通常是接口明确拒绝了能力（如 400 / 404），不代表 Key 无效；红色更可能是鉴权、限流、网络或服务端错误。Context 是从 `/models` 的元数据读取的声明值，不代表当前请求一定能完整使用全部窗口；手动输入模型 ID 时通常无法读取该字段。</p></div></div>}
+          {selected && <div className="panel detail-panel"><div className="detail-head"><div><span className="section-index">C / READOUT</span><h2>{selected.id}</h2></div><span className={`detail-status ${overallForModel(selected)}`}>{overallForModel(selected) === 'pass' ? 'COMPATIBILITY READY' : 'NEEDS REVIEW'}</span></div><div className="detail-grid"><div className={`detail-card ${selected.declaredContext ? 'pass' : 'idle'}`}><div className="detail-card-top"><span className="detail-key">CONTEXT</span><span className="detail-status-dot" /></div><strong>声明的 Context</strong><small>{selected.declaredContext ? `${formatContext(selected.declaredContext)} tokens · 来自模型目录元数据` : '模型目录未返回常见 Context 字段'}</small>{selected.contextField && <code>{selected.contextField}</code>}</div>{PROBES.map((probe) => { const result = selected.probes[probe.key]; return <div className={`detail-card ${result?.status ?? 'idle'}`} key={probe.key}><div className="detail-card-top"><span className="detail-key">{probe.short}</span><span className="detail-status-dot" /></div><strong>{probe.label}</strong><small>{result ? result.detail : catalogOnly ? '尚未发起能力测试' : '快速模式未执行此项'}</small>{result?.endpoint && <code>{result.endpoint.replace(cleanBaseUrl(baseUrl), '…')}</code>}</div> })}</div><div className="model-performance"><span className="readout-label">PERFORMANCE · STREAM</span><div className="model-performance-values"><div><small>首字延迟</small><strong>{selected.probes.stream?.firstTokenMs ? `${selected.probes.stream.firstTokenMs} ms` : '—'}</strong></div><div><small>输出速度</small><strong>{selected.probes.stream?.tokensPerSecond ? `${selected.probes.stream.tokensPerSecond} t/s` : selected.probes.stream?.charsPerSecond ? `${selected.probes.stream.charsPerSecond} 字/s` : '—'}</strong></div><div><small>完整响应</small><strong>{selected.probes.stream?.duration ? `${selected.probes.stream.duration} ms` : '—'}</strong></div></div></div><div className="compat-note"><span className="note-symbol">i</span><p><strong>如何解读：</strong>绿色表示该协议在当前模型上真实返回成功；黄色通常是接口明确拒绝了能力（如 400 / 404），不代表 Key 无效；红色更可能是鉴权、限流、网络或服务端错误。Context 是从 `/models` 的元数据读取的声明值，不代表当前请求一定能完整使用全部窗口；手动输入模型 ID 时通常无法读取该字段。</p></div></div>}
         </section>
       </section>
 

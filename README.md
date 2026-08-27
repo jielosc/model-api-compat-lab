@@ -7,6 +7,7 @@
 ## 能力
 
 - 读取 OpenAI-compatible / Anthropic-compatible API 的模型目录
+- 支持只获取模型列表，不发起能力测试请求
 - 探测文本、多模态、工具调用、JSON、流式输出
 - 检查 OpenAI Responses API（Codex 兼容基础）和 Anthropic Messages API（Claude Code 兼容基础）
 - 记录平均首字延迟、输出速度和完整响应耗时
