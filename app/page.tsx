@@ -477,6 +477,8 @@ export default function Home() {
   const [deepScan, setDeepScan] = useState(false);
   const [maxModels, setMaxModels] = useState('12');
   const [models, setModels] = useState<ModelResult[]>([]);
+  const [catalogModels, setCatalogModels] = useState<ModelResult[]>([]);
+  const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [catalogOnly, setCatalogOnly] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
@@ -602,10 +604,14 @@ export default function Home() {
     return trimmedBase;
   }
 
-  function applyModelCatalog(found: { discovered: DiscoveredModel[]; endpoint: string }, limitToMaxModels: boolean) {
-    const limited = limitToMaxModels ? found.discovered.slice(0, Math.max(1, Number(maxModels) || 12)) : found.discovered;
-    const initialModels = limited.map((item) => ({ id: item.id, ownedBy: item.ownedBy, declaredContext: item.declaredContext, contextField: item.contextField, family: familyForModel(item.id), probes: {} }));
+  function applyModelCatalog(found: { discovered: DiscoveredModel[]; endpoint: string }, limitToMaxModels: boolean, selectedIds?: Set<string>) {
+    const allModels = found.discovered.map((item) => ({ id: item.id, ownedBy: item.ownedBy, declaredContext: item.declaredContext, contextField: item.contextField, family: familyForModel(item.id), probes: {} }));
+    const scopedModels = selectedIds ? allModels.filter((model) => selectedIds.has(model.id)) : allModels;
+    const limited = limitToMaxModels ? scopedModels.slice(0, Math.max(1, Number(maxModels) || 12)) : scopedModels;
+    const initialModels = limited;
     setCatalogTotal(found.discovered.length);
+    setCatalogModels(allModels);
+    setSelectedModelIds(scopedModels.map((model) => model.id));
     setModels(initialModels);
     setSelectedModel(initialModels[0]?.id ?? null);
     return { initialModels, limited };
@@ -621,6 +627,8 @@ export default function Home() {
     setRunning(true);
     setError('');
     setModels([]);
+    setCatalogModels([]);
+    setSelectedModelIds([]);
     setCatalogTotal(0);
     setCatalogOnly(true);
     setSelectedModel(null);
@@ -653,6 +661,10 @@ export default function Home() {
 
   async function runHealthCheck() {
     if (running) return;
+    if (catalogModels.length > 0 && selectedModelIds.length === 0) {
+      setError('请至少选择一个模型后再开始一键体检。');
+      return;
+    }
     const trimmedBase = validateBaseUrl();
     if (!trimmedBase) return;
 
@@ -660,6 +672,8 @@ export default function Home() {
     abortRef.current = controller;
     setRunning(true);
     setError('');
+    const hasExistingCatalog = catalogModels.length > 0;
+    const selectedBeforeRun = hasExistingCatalog ? new Set(selectedModelIds) : undefined;
     setModels([]);
     setCatalogTotal(0);
     setCatalogOnly(false);
@@ -672,7 +686,9 @@ export default function Home() {
     try {
       const found = await discoverModels(controller);
       const probeKeys = probeKeysForMode(deepScan);
-      const { initialModels, limited } = applyModelCatalog(found, true);
+      if (selectedBeforeRun && !found.discovered.some((item) => selectedBeforeRun.has(item.id))) throw new Error('所选模型在最新目录中不存在，请重新获取模型列表后再试。');
+      const { initialModels, limited } = applyModelCatalog(found, true, selectedBeforeRun);
+      setCatalogTotal(found.discovered.length);
       setProgressScope({ ids: initialModels.map((model) => model.id), keys: probeKeys });
       addActivity(`发现 ${found.discovered.length} 个模型 · ${found.endpoint}`, 'good');
       if (found.discovered.length > limited.length) addActivity(`为控制请求量，本次先测试前 ${limited.length} 个模型`);
@@ -703,6 +719,19 @@ export default function Home() {
 
   function stopHealthCheck() {
     abortRef.current?.abort();
+  }
+
+  function toggleModel(id: string) {
+    setSelectedModelIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
+  function selectAllModels() {
+    const options = catalogModels.length ? catalogModels : models;
+    setSelectedModelIds(options.map((model) => model.id));
+  }
+
+  function clearModels() {
+    setSelectedModelIds([]);
   }
 
   async function testModel(id: string) {
@@ -836,7 +865,7 @@ export default function Home() {
       </div>
 
       <section className="workspace">
-        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} deepScan={deepScan} maxModels={maxModels} running={running} phase={phase} progress={progress} activities={activities} onBaseUrlChange={setBaseUrl} onApiKeyChange={setApiKey} onAuthModeChange={setAuthModeValue} onManualModelsChange={setManualModels} onDeepScanChange={setDeepScan} onMaxModelsChange={setMaxModels} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
+        <ConfigPanel baseUrl={baseUrl} apiKey={apiKey} authModeValue={authModeValue} manualModels={manualModels} modelOptions={catalogModels.length ? catalogModels : models} selectedModelIds={selectedModelIds} deepScan={deepScan} maxModels={maxModels} running={running} phase={phase} progress={progress} activities={activities} onBaseUrlChange={setBaseUrl} onApiKeyChange={setApiKey} onAuthModeChange={setAuthModeValue} onManualModelsChange={setManualModels} onToggleModel={toggleModel} onSelectAllModels={selectAllModels} onClearModels={clearModels} onDeepScanChange={setDeepScan} onMaxModelsChange={setMaxModels} onGetModelList={getModelList} onRunHealthCheck={runHealthCheck} onStopHealthCheck={stopHealthCheck} />
         <section className="results-column">
           <SummaryOverview summary={summary} />
           <ModelMatrix models={models} selectedId={selected?.id ?? null} deepScan={deepScan} catalogOnly={catalogOnly} catalogTotal={catalogTotal} maxModels={maxModels} summary={summary} error={error} running={running} onSelect={setSelectedModel} onExportJson={exportJson} onCopyMarkdown={copyMarkdown} />
